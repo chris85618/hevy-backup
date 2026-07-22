@@ -1,0 +1,27 @@
+:root { --bg:#0f1115; --panel:#1a1d24; --border:#2a2f3a; --fg:#e6e8ee; --muted:#8b93a7; --accent:#4f8cff; --ok:#3fb96b; --err:#e5534b; }
+* { box-sizing: border-box; }
+body { margin:0; font-family: system-ui, "Noto Sans TC", sans-serif; background:var(--bg); color:var(--fg); }
+header { display:flex; justify-content:space-between; align-items:center; padding:12px 24px; border-bottom:1px solid var(--border); }
+h1 { font-size:20px; margin:0; } h1 small { color:var(--muted); font-weight:normal; font-size:13px; margin-left:8px; }
+nav button { background:none; border:none; color:var(--muted); padding:8px 14px; cursor:pointer; font-size:14px; border-radius:6px; }
+nav button.active { color:var(--fg); background:var(--panel); }
+main { padding:24px; max-width:1100px; margin:0 auto; }
+.tab { display:none; } .tab.active { display:block; }
+.cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(140px,1fr)); gap:12px; margin-bottom:20px; }
+.card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px; text-align:center; }
+.card b { display:block; font-size:22px; } .card span { color:var(--muted); font-size:12px; }
+.row { display:flex; gap:10px; align-items:center; margin:14px 0; flex-wrap:wrap; }
+button, .button { background:var(--panel); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:8px 14px; cursor:pointer; text-decoration:none; font-size:14px; display:inline-block; }
+button.primary { background:var(--accent); border-color:var(--accent); }
+input, select { background:var(--panel); color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:14px; }
+table { width:100%; border-collapse:collapse; margin-top:10px; font-size:13px; }
+th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); }
+tbody tr { cursor:pointer; } tbody tr:hover { background:var(--panel); }
+td.success { color:var(--ok); } td.error, td.running { color:var(--err); }
+td.detail { color:var(--muted); max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+pre { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px; overflow:auto; max-height:420px; font-size:12px; }
+.hidden { display:none; }
+form label { display:block; margin:12px 0; color:var(--muted); font-size:13px; }
+form input { display:block; width:360px; max-width:100%; margin-top:4px; }
+.muted { color:var(--muted); font-size:13px; }
+h2 { font-size:16px; margin-top:28px; }

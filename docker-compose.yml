@@ -1,0 +1,21 @@
+services:
+  backend:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DB_PATH=/data/fitir.db
+    volumes:
+      - ./data:/data
+    ports:
+      - "8000:8000"   # direct API access (frontend/backend are separable)
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

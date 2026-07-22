@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>hevy-bridge</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>hevy-bridge <small>FitIR data hub</small></h1>
+    <nav>
+      <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="data">Data</button>
+      <button data-tab="export">Export</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="tab-dashboard" class="tab active">
+      <div class="cards" id="status-cards"></div>
+      <div class="row">
+        <button id="sync-now" class="primary">Sync from Hevy now</button>
+        <span id="sync-result"></span>
+      </div>
+      <h2>Sync history</h2>
+      <table id="runs-table">
+        <thead><tr><th>#</th><th>Connector</th><th>Started</th><th>Status</th><th>Detail</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section id="tab-data" class="tab">
+      <div class="row">
+        <select id="kind-select">
+          <option value="session">Sessions (訓練紀錄)</option>
+          <option value="plan">Plans (課表)</option>
+          <option value="exercise">Exercises (運動字典)</option>
+          <option value="body-metric">Body metrics (身體測量)</option>
+        </select>
+        <input id="search" type="text" placeholder="search…">
+        <button id="prev">◀</button><span id="page-info"></span><button id="next">▶</button>
+      </div>
+      <table id="data-table"><thead></thead><tbody></tbody></table>
+      <pre id="doc-detail" class="hidden"></pre>
+    </section>
+
+    <section id="tab-export" class="tab">
+      <h2>FitIR bundle</h2>
+      <p>下載完整 IR 資料包（單一事實來源的中立格式，任何 app 的 exporter 皆以此為輸入）。</p>
+      <a class="button" href="/api/export/ir" download="fitir-bundle.json">Download fitir-bundle.json</a>
+
+      <h2>Export to wger</h2>
+      <div class="row">
+        <button id="wger-preview">Preview</button>
+        <button id="wger-push" class="primary">Push to wger</button>
+        <span id="wger-result"></span>
+      </div>
+      <div id="wger-preview-box"></div>
+      <h3>Unresolved exercise mappings</h3>
+      <p>自動名稱解析失敗的動作：填入 wger exercise id 後儲存。</p>
+      <table id="unresolved-table">
+        <thead><tr><th>IR id</th><th>Name</th><th>wger exercise id</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section id="tab-settings" class="tab">
+      <h2>Settings</h2>
+      <form id="settings-form">
+        <label>Hevy API key <input name="hevy_api_key" type="password" autocomplete="off"></label>
+        <label>wger base URL <input name="wger_base_url" type="text" placeholder="https://wger.example.com"></label>
+        <label>wger API key <input name="wger_api_key" type="password" autocomplete="off"></label>
+        <label>Sync interval (minutes) <input name="sync_interval_minutes" type="number" min="1"></label>
+        <button type="submit" class="primary">Save</button>
+        <span id="settings-result"></span>
+      </form>
+      <p class="muted">金鑰儲存於後端資料庫；欄位顯示為遮罩值時代表已設定。排程間隔變更於後端重啟後生效。</p>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
