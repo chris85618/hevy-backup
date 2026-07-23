@@ -9,7 +9,7 @@ from .. import config, db
 from ..connectors import EXPORTERS, IMPORTERS
 from ..connectors.wger import WgerExporter
 from ..ir.schema import DOC_TYPES, FITIR_VERSION
-from ..services.sync import run_sync
+from ..services.sync import run_export, run_sync
 
 router = APIRouter(prefix="/api")
 
@@ -88,10 +88,12 @@ def wger_preview() -> dict[str, Any]:
 
 @router.post("/export/wger")
 def wger_push() -> dict[str, Any]:
-    try:
-        return WgerExporter().push()
-    except RuntimeError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    result = run_export("wger")
+    if result["status"] == "error":
+        raise HTTPException(400, result["error"])
+    if result["status"] == "already_running":
+        raise HTTPException(409, "a sync/export run is already in progress")
+    return result["report"]
 
 
 class ExerciseMapping(BaseModel):

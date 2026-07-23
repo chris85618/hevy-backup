@@ -122,6 +122,15 @@ def find_ref(system: str, kind: str, external_id: str) -> Optional[str]:
     return row["ir_id"] if row else None
 
 
+def delete_ref(system: str, kind: str, ir_id: str) -> None:
+    with _lock:
+        _db().execute(
+            "DELETE FROM refs WHERE system=? AND kind=? AND ir_id=?",
+            (system, kind, ir_id),
+        )
+        _db().commit()
+
+
 def find_external(system: str, kind: str, ir_id: str) -> Optional[str]:
     row = _db().execute(
         "SELECT external_id FROM refs WHERE system=? AND kind=? AND ir_id=?",

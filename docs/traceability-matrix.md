@@ -20,7 +20,8 @@
 | FR-022 | docker-compose 部署 | 任務 3 | docker-compose.yml | compose config valid（含無 .env） |
 | FR-023 | Web GUI（狀態/瀏覽/匯出/設定/映射） | 任務 3 | frontend/ | node --check + API 實測 |
 | FR-024 | 前後端分離、JSON 邊界 | 任務 3 | nginx 反代 + CORS | architecture.md §1 |
-| FR-025 | wger 匯出（session/weight + 動作解析） | 任務 3 | connectors/wger.py | preview API 實測；push 需真實 wger（DEBT-001） |
+| FR-025 | wger 匯出（session/weight + 動作解析） | 任務 3 | connectors/wger.py | 真實 wger 2.7 實測通過 (2026-07-23)：5 sessions / 226 logs |
+| FR-027 | Exercise 解析 pipeline（manual/override/catalog/create + 失效重驗 + 排程自動 push） | FR-025, DEBT-001 | connectors/wger.py + data/wger-mapping.yaml + services/sync.py | 41 動作全解析（31 catalog + 10 create）；push 0 errors |
 | FR-026 | 擴充新 app N+M | ADR-STR-001 | connectors/base.py + registry | architecture.md §3 |
 | ADR-STR-001~005, ADR-SEC-001 | 架構決策 | FR-* | docs/adr.md | — |
 | RISK-001 | GUI 無認證 | ADR-SEC-001 | workflow-state.md | open, MEDIUM |

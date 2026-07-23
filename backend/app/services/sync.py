@@ -6,7 +6,7 @@ import logging
 import threading
 
 from .. import db
-from ..connectors import IMPORTERS
+from ..connectors import EXPORTERS, IMPORTERS
 
 log = logging.getLogger(__name__)
 _sync_lock = threading.Lock()
@@ -30,8 +30,33 @@ def run_sync(connector: str = "hevy") -> dict:
         _sync_lock.release()
 
 
+def run_export(exporter: str = "wger") -> dict:
+    """Push through a registered exporter; audit report into sync_runs."""
+    if exporter not in EXPORTERS:
+        raise ValueError(f"unknown exporter: {exporter}")
+    if not _sync_lock.acquire(blocking=False):
+        return {"status": "already_running"}
+    run_id = db.start_run(exporter)
+    try:
+        report = EXPORTERS[exporter]().push()
+        status = "success" if not report.get("errors") else "partial"
+        db.finish_run(run_id, status, json.dumps(report, ensure_ascii=False))
+        return {"status": status, "report": report}
+    except Exception as exc:  # noqa: BLE001 — report, don't crash the scheduler
+        log.exception("export failed")
+        db.finish_run(run_id, "error", str(exc))
+        return {"status": "error", "error": str(exc)}
+    finally:
+        _sync_lock.release()
+
+
 def scheduled_sync() -> None:
     if not db.get_setting("hevy_api_key"):
         log.info("skipping scheduled sync: hevy_api_key not configured")
         return
     run_sync("hevy")
+    # fully automated bridge: push straight to wger after every pull
+    if EXPORTERS["wger"]().configured():
+        run_export("wger")
+    else:
+        log.info("skipping scheduled export: wger not configured")
