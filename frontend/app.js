@@ -110,7 +110,7 @@ async function renderPreview() {
       <li>pending sessions: ${p.pending_sessions}</li>
       <li>updated sessions to re-push: ${p.updated_sessions}</li>
       <li>sessions to mark deleted: ${p.sessions_to_mark_deleted}</li>
-      <li>pending plans (routines): ${p.pending_plans}</li>
+      <li>pending plans (templates): ${p.pending_plans}</li>
       <li>pending weight entries: ${p.pending_weight_entries}</li>
       <li>pending measurements: ${p.pending_measurements}</li>
       <li>pending exercise updates: ${p.pending_exercise_updates}</li>

@@ -5,11 +5,16 @@ session      -> POST /workoutsession/ + one /workoutlog/ per set (R1);
                 ref exists); updates PATCH the session and rebuild its
                 logs; sessions deleted in Hevy get a "[deleted in Hevy]"
                 notes prefix (user decision 2026-07-23: never auto-delete)
-plan         -> /routine/ + /day/ + /slot/ + /slot-entry/ + *-config
-                (wger 2.7 model); updates PATCH the routine in place and
-                rebuild only its days — WorkoutSession.routine is
-                on_delete=CASCADE, so delete-recreate would wipe every
-                linked session and its logs
+plan         -> two /routine/ trees (each /routine/ + /day/ + /slot/ +
+                /slot-entry/ + *-config, wger 2.7 model): a Hevy routine
+                is an agile template, not a calendar plan, so it lowers
+                to a frozen wger template (is_template=True) plus one
+                execution routine (is_template=False) that sessions and
+                logs link to, dated over the actual training days;
+                updates PATCH both in place and rebuild only their days
+                — WorkoutSession.routine is on_delete=CASCADE, so
+                delete-recreate would wipe every linked session and its
+                logs
 body-metric  -> weight goes to /weightentry/; other metric_keys go to
                 auto-created /measurement-category/ + /measurement/ (R9)
 exercise     -> auto-created exercises get name/muscle/equipment written
@@ -419,8 +424,11 @@ class WgerExporter:
         return work
 
     def _plan_work(self) -> list[dict[str, Any]]:
+        # no template ref yet: pushed before the template/routine split,
+        # re-push once so the wger template gets created
         return [p for p in db.list_docs("plan")
-                if self._status("plan", p, "routine")]
+                if self._status("plan", p, "routine")
+                or not db.find_external(SYSTEM, "template", p["id"])]
 
     def _body_metric_work(self) -> dict[str, list[tuple[str, dict[str, Any]]]]:
         work: dict[str, list[tuple[str, dict[str, Any]]]] = {
@@ -737,36 +745,78 @@ class WgerExporter:
         for day_id in day_ids:
             client.delete(f"/day/{day_id}/").raise_for_status()
 
-    def _push_plan(self, client: httpx.Client, plan: dict[str, Any],
-                   exercises: dict[str, dict[str, Any]],
-                   report: dict[str, Any]) -> None:
-        """Create a wger routine, or update it in place: PATCH the routine
-        row and rebuild only its days. The routine row itself must survive
-        because WorkoutSession.routine is on_delete=CASCADE — deleting it
-        would take every linked session (and its logs) with it."""
-        resolved = self._resolve_all(
-            client, sorted(self._plan_exercise_ids([plan])), exercises)
+    @staticmethod
+    def _exec_dates(plan_id: str) -> tuple[date, date]:
+        """Window of the execution routine: back to the first logged
+        session of this plan, forward 70 days so wger keeps showing it
+        as the current routine. wger caps a routine at MAX_DURATION_DAYS
+        (120), so the start is clamped when the history is longer — the
+        log linkage itself is the routine FK, not the date window."""
+        end = date.today() + timedelta(days=70)
         start = date.today()
-        routine_payload = {
-            "name": (plan.get("name") or plan["id"])[:25],
-            "description": (plan.get("description") or "")[:1000],
-            "start": start.isoformat(),
-            "end": (start + timedelta(days=70)).isoformat(),
-        }
+        first = min((s["started_at"][:10] for s in db.list_docs("session")
+                     if s.get("plan_id") == plan_id and s.get("started_at")),
+                    default=None)
+        if first:
+            start = date.fromisoformat(first)
+        return max(start, end - timedelta(days=119)), end
+
+    def _upsert_routine(self, client: httpx.Client, ref_kind: str,
+                        plan: dict[str, Any],
+                        payload: dict[str, Any]) -> int:
+        """PATCH in place when a ref exists (keeps the id stable and the
+        linked sessions alive), else POST; an existing routine gets its
+        days wiped for the rebuild."""
         routine_id = None
-        old = db.find_external(SYSTEM, "routine", plan["id"])
+        old = db.find_external(SYSTEM, ref_kind, plan["id"])
         if old:
-            resp = client.patch(f"/routine/{old}/", json=routine_payload)
+            resp = client.patch(f"/routine/{old}/", json=payload)
             if resp.status_code == 404:  # deleted on wger side
-                db.delete_ref(SYSTEM, "routine", plan["id"])
+                db.delete_ref(SYSTEM, ref_kind, plan["id"])
             else:
                 resp.raise_for_status()
                 routine_id = resp.json()["id"]
                 self._delete_routine_days(client, routine_id)
         if routine_id is None:
-            resp = client.post("/routine/", json=routine_payload)
+            resp = client.post("/routine/", json=payload)
             resp.raise_for_status()
             routine_id = resp.json()["id"]
+        db.put_ref(SYSTEM, ref_kind, str(routine_id), "plan", plan["id"])
+        return routine_id
+
+    def _push_plan(self, client: httpx.Client, plan: dict[str, Any],
+                   exercises: dict[str, dict[str, Any]],
+                   report: dict[str, Any]) -> None:
+        """A Hevy routine maps to a wger template (the reusable blueprint
+        Hevy logs against), so each plan pushes twice: the template
+        (ref kind "template", is_template=True) and the execution routine
+        the workout sessions and logs link to (ref kind "routine",
+        is_template=False) — mirroring wger's own template -> routine
+        copy flow."""
+        resolved = self._resolve_all(
+            client, sorted(self._plan_exercise_ids([plan])), exercises)
+        base = {
+            "name": (plan.get("name") or plan["id"])[:25],
+            "description": (plan.get("description") or "")[:1000],
+        }
+        today = date.today()
+        template_id = self._upsert_routine(client, "template", plan, {
+            **base, "is_template": True,
+            "start": today.isoformat(),
+            "end": (today + timedelta(days=70)).isoformat(),
+        })
+        self._push_days(client, template_id, plan, resolved)
+        start, end = self._exec_dates(plan["id"])
+        routine_id = self._upsert_routine(client, "routine", plan, {
+            **base, "is_template": False,
+            "start": start.isoformat(), "end": end.isoformat(),
+        })
+        self._push_days(client, routine_id, plan, resolved)
+        self._mark_pushed("plan", plan)
+        report["plans_exported"] += 1
+
+    def _push_days(self, client: httpx.Client, routine_id: Any,
+                   plan: dict[str, Any], resolved: dict[str, str]) -> None:
         for day in sorted(plan["days"], key=lambda d: d.get("order", 0)):
             resp = client.post("/day/", json={
                 "routine": routine_id,
@@ -787,9 +837,6 @@ class WgerExporter:
                 slot_id = resp.json()["id"]
                 for pos, entry in enumerate(group, start=1):
                     self._push_slot_entry(client, slot_id, pos, entry, resolved)
-        db.put_ref(SYSTEM, "routine", str(routine_id), "plan", plan["id"])
-        self._mark_pushed("plan", plan)
-        report["plans_exported"] += 1
 
     def _push_slot_entry(self, client: httpx.Client, slot_id: int, order: int,
                          entry: dict[str, Any],

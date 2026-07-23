@@ -1,6 +1,6 @@
 # Workflow State
 
-- **Pipeline Position**: Phase 9 完成 — 全面增量匯出 (FR-028) + session↔routine 關聯 (ADR-STR-007 修訂) 已實作並真實驗證：wger 實例上 4/5 sessions 關聯正確 routine、194/226 logs 帶 routine（32 筆屬無 plan 的 07-14 session，正確），preview 全零收斂
+- **Pipeline Position**: Phase 9 完成 — template 語意對齊 (FR-029)：Hevy routine ≙ wger template，plan 推 template + 執行 routine 雙樹，日誌掛執行 routine；真實驗證通過，preview 全零收斂
 - **Last Updated**: 2026-07-23
 - **Gate Status**: Stage 3-8 由使用者單一 prompt 預先授權通過；Phase 9 驗收標準（2026-07-23 規格）全數通過
 - **環境注意**:
@@ -18,6 +18,7 @@
 - **已解決**:
   - DEBT-003 ✅ (2026-07-23): 排程改 crontab（`sync_cron`，`CronTrigger.from_crontab`），PUT /settings 經 `scheduler.apply_cron` 即時 reschedule，免重啟。舊 `sync_interval_minutes` 啟動時一次性遷移（<60 分 → `*/N`、整點倍數 → `0 */H`、其餘 → 每小時預設）
   - DEBT-001 ✅ (2026-07-23): exercise 自動解析真實驗證 — 41 個 pending 動作 31 個 catalog 命中、10 個 create 自動建立（含 McGill改良式捲腹/RKC棒式/側棒式）；`/exercise/search/` 依賴已移除
+- **Session Summary (2026-07-23, template 語意對齊 FR-029)**: 使用者確認概念模型 — Hevy routine 是敏捷即用範本，對應 wger 的 template（`is_template=True`），wger routine 才是按表操課的行事曆計畫、日誌長在其上。修正：`_push_plan` 改推雙樹（template ref kind `template` + 執行 routine 延用 ref kind `routine`，零遷移 — 已掛 sessions 的舊 routine 就地 PATCH 轉執行態）；`_upsert_routine` 抽共用 PATCH-or-POST、`_push_days` 抽 day 重建、`_exec_dates` 算執行窗（plan 最早 session 日 → 今日+70，clamp 至 wger MAX_DURATION_DAYS=120）；`_plan_work` 對缺 template ref 的 plan 一次性重推。真實驗證：templates 6/7（is_template=True，1 day/7 slots 各）、routines 1/2（is_template=False，start 回溯 07-18/07-19）、sessions 4/5 關聯執行 routine 不動（07-14 無 plan 者 null 正確）、logs 194 全在執行 routine（template 上 0）、0 errors、preview 全零。wger 上另有使用者手動測試的 routine 4 ('test')，非本橋管理，未觸碰
 - **Session Summary (2026-07-23, crontab 排程)**: sync interval (minutes) 機制改為 5 欄 crontab（FR-020 實作變更）。新增 `app/scheduler.py`（module-level scheduler + `apply_cron`），設定鍵 `sync_interval_minutes` → `sync_cron`（env `SYNC_CRON`），PUT /settings 驗證 crontab（無效回 400）並即時 reschedule（DEBT-003 解決）。GUI Settings 欄位改文字輸入 + 錯誤顯示。冒煙驗證：legacy 30 分鐘 DB 遷移為 `*/30 * * * *`、PUT 換排程 next_run_time 即時更新、無效格式 400 帶明確訊息
 - **Session Summary (2026-07-23, 後段)**: 依討論定案規格實作 resolver pipeline（wger.py 重構 + wger-mapping.yaml + db.delete_ref + sync.run_export 排程整合 + PyYAML）。過程中修復三個 wger 2.7 相容性問題（search 404 → catalog 比對；description_source 40 字元；duration-only set 降階為 repetition_unit=Seconds）。5/5 sessions 匯出、0 errors；孤兒 exercise 11 個與孤兒 session 2 個已清理
 - **Session Summary (2026-07-23, superset 修復)**: 使用者回報 routine 匯出無 superset。根因：hevy.py lowering 誤用 `supersets_id`（Hevy 實為 `superset_id`），group_key 全 None — 匯入端缺陷，FR-005 原冒煙測試用合成資料未攔到（LESSON: lowering 測試必須用真實 raw_archive payload）。連帶暴露第二缺陷：lowering 邏輯修正後內容變但來源 updated_at 不動，export_state 偵測不到 → put_doc_if_changed 加反向不變量（內容變+時間戳同 → 強制 bump）。修復後 raw_archive 全量重 lower、2 routines 重推：14 slots / 12 supersets（含 4 連、6 連 giant set）實測正確，preview 全零收斂

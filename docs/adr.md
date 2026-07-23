@@ -33,8 +33,9 @@
 - **決策**：IR plan 匯為 `/routine/ + /day/ + /slot/ + /slot-entry/ + *-config`（iteration=1, operation=r, step=na，實測驗證）。更新 = PATCH routine 本體 + 刪除其 days 後重建（day 級聯 slots/entries/configs），拒絕 diff（Ockham）。
 - **修訂**（2026-07-23，session↔routine 關聯修復）：原「DELETE routine 後重建」已廢棄 — wger `WorkoutSession.routine` 為 `on_delete=CASCADE`，刪 routine 會連帶刪除所有已關聯 session 與其 logs。routine row 必須存活以保持 id 穩定。`/day/` 無 routine filter（wger 2.7 filterset 未含），改為抓取使用者全部 days 後 client 端比對刪除。
 - **Session 關聯**：session 匯出時帶 `routine`（來自 IR `plan_id` → routine ref；push 順序改為 plans 先於 sessions，fresh instance 全量匯出時 ref 才存在）；workoutlog 帶 session 實際連結的 routine（以 wger 回應為準）。wger 有 unique(date, user, routine) 約束：同 routine 同日第二個 session 於 400 時退回不關聯（`_send_session` fallback），不使匯出失敗。
+- **修訂**（2026-07-23，template 語意對齊，FR-029）：概念修正 — Hevy routine 是「訓練時即時取用的敏捷範本」，語意對應 wger 的 **template**（`is_template=True` 的 routine），不是 wger 的行事曆型執行 routine。因此每個 plan 推送**兩棵** routine 樹：(1) template（ref kind `template`，`is_template=True`，凍結的範本，對應 wger UI 的 Templates 清單）；(2) 執行 routine（ref kind `routine`，`is_template=False`），等同使用者「用 template 建立計畫」，session 與 workoutlog 全部掛在執行 routine 上（延用既有 `routine` ref kind，故既有實例零遷移 — 已掛 session 的舊 routine 就地 PATCH 成執行 routine，template 新建補齊；`_plan_work` 對缺 template ref 的 plan 觸發一次性重推）。執行 routine 日期範圍 = 該 plan 最早 session 日 → 今日+70 天（受 wger `MAX_DURATION_DAYS=120` 限制，過長時 start 向後截斷；真正的日誌關聯是 FK 不是日期窗）。實測 (2026-07-23)：templates 6/7 建立（各 1 day/7 slots，superset 結構同執行 routine）、執行 routine 1/2 就地轉換（is_template=False、start 回溯至 07-18/07-19）、194 logs 與 4 sessions 關聯不動、0 errors、preview 收斂全零。
 - **有損映射**：wger config 為 per-entry，Hevy target 為 per-set → 取第一個有 target 的 set 供值；sets-config = set 數。duration-only 降為 repetition_unit=3（秒），與 workoutlog 同法。superset：連續同 group_key entry 共享一個 slot。
-- **常數**：routine name 截 25 字元、day name 截 20、notes 截 100；start=推送日、end=+70 天（wger 必填欄位，Hevy 無對應概念）。
+- **常數**：routine name 截 25 字元、day name 截 20、notes 截 100；template 的 start=推送日、end=+70 天（wger 必填欄位，template 凍結後日期無實質作用）。
 
 ## ADR-SEC-001: 金鑰處理
 - **決策**：金鑰來源 env 或 GUI 設定（存 DB settings 表，明文，檔案權限保護）；`.env`/`data/` 進 `.gitignore`；日誌不輸出金鑰。

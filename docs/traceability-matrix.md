@@ -24,6 +24,7 @@
 | FR-027 | Exercise 解析 pipeline（manual/override/catalog/create + 失效重驗 + 排程自動 push） | FR-025, DEBT-001 | connectors/wger.py + data/wger-mapping.yaml + services/sync.py | 41 動作全解析（31 catalog + 10 create）；push 0 errors |
 | FR-026 | 擴充新 app N+M | ADR-STR-001 | connectors/base.py + registry | architecture.md §3 |
 | FR-028 | 全面增量匯出：session 更新/刪除標記、plan→routine、全 body-metric、exercise 回寫 | FR-025, R1, R9, ADR-STR-006/007 | db.py export_state + connectors/wger.py + connectors/hevy.py | 離線冒煙 24/24；真實 wger 實測 (2026-07-23)：2 routines 匯出、1 session 更新重建 32 logs、0 errors、preview 收斂全零 |
+| FR-029 | Hevy routine ≙ wger template：plan 推 template（is_template）+ 執行 routine 雙樹；日誌掛執行 routine | FR-028, ADR-STR-007 修訂 | connectors/wger.py `_push_plan`/`_upsert_routine`/`_exec_dates` | 真實 wger 實測 (2026-07-23)：templates 6/7 建立、routines 1/2 就地轉執行態（start 回溯訓練首日）、194 logs/4 sessions 關聯不動、preview 收斂全零 |
 | ADR-STR-001~007, ADR-SEC-001 | 架構決策 | FR-* | docs/adr.md | — |
 | RISK-001 | GUI 無認證 | ADR-SEC-001 | workflow-state.md | open, MEDIUM |
 | DEBT-001~004 | 見 workflow-state.md | — | — | DEBT-004 已由 FR-028 緩解（更新重推自癒）；餘 active |
