@@ -72,11 +72,11 @@
         <label>Hevy API key <input name="hevy_api_key" type="password" autocomplete="off"></label>
         <label>wger base URL <input name="wger_base_url" type="text" placeholder="https://wger.example.com"></label>
         <label>wger API key <input name="wger_api_key" type="password" autocomplete="off"></label>
-        <label>Sync interval (minutes) <input name="sync_interval_minutes" type="number" min="1"></label>
+        <label>Sync schedule (crontab) <input name="sync_cron" type="text" placeholder="0 * * * *" spellcheck="false"></label>
         <button type="submit" class="primary">Save</button>
         <span id="settings-result"></span>
       </form>
-      <p class="muted">金鑰儲存於後端資料庫；欄位顯示為遮罩值時代表已設定。排程間隔變更於後端重啟後生效。</p>
+      <p class="muted">金鑰儲存於後端資料庫；欄位顯示為遮罩值時代表已設定。排程使用標準 5 欄 crontab 格式（分 時 日 月 週，如 <code>*/30 * * * *</code> 為每 30 分鐘），變更即時生效。</p>
     </section>
   </main>
   <script src="app.js"></script>

@@ -12,12 +12,13 @@
 - **Pending Escalations**:
   - RISK-001: Web GUI 無認證（內網定位，公開部署需 nginx basic auth）— 已於 adr.md ADR-SEC-001 揭露
   - DEBT-002 (P3): Liftosaur connector 未實作（IR 已預留 ext.liftosaur 與 refs 結構）
-  - DEBT-003 (P3): sync_interval 變更需重啟後端才生效
   - DEBT-004 (P3，已降級): wger session push 非交易性 — 新建路徑仍可能留孤兒 session，但 FR-028 更新重推路徑（刪 log 重建）可自癒部分匯出；殘餘風險僅剩「POST session 成功後 ref 寫入前中斷」窄窗
   - DEBT-005 (P3): 升級前 auto-create 的 10 個 exercise 無 exercise_translation ref，不參與中繼資料回寫（僅此後新建者參與）
   - DEBT-006 (P3): plan→routine 為有損降階（per-set target 取第一組、start/end 為合成日期，見 ADR-STR-007）；Hevy 刪除 routine 不傳播（Hevy API 無 routine 事件）
 - **已解決**:
+  - DEBT-003 ✅ (2026-07-23): 排程改 crontab（`sync_cron`，`CronTrigger.from_crontab`），PUT /settings 經 `scheduler.apply_cron` 即時 reschedule，免重啟。舊 `sync_interval_minutes` 啟動時一次性遷移（<60 分 → `*/N`、整點倍數 → `0 */H`、其餘 → 每小時預設）
   - DEBT-001 ✅ (2026-07-23): exercise 自動解析真實驗證 — 41 個 pending 動作 31 個 catalog 命中、10 個 create 自動建立（含 McGill改良式捲腹/RKC棒式/側棒式）；`/exercise/search/` 依賴已移除
+- **Session Summary (2026-07-23, crontab 排程)**: sync interval (minutes) 機制改為 5 欄 crontab（FR-020 實作變更）。新增 `app/scheduler.py`（module-level scheduler + `apply_cron`），設定鍵 `sync_interval_minutes` → `sync_cron`（env `SYNC_CRON`），PUT /settings 驗證 crontab（無效回 400）並即時 reschedule（DEBT-003 解決）。GUI Settings 欄位改文字輸入 + 錯誤顯示。冒煙驗證：legacy 30 分鐘 DB 遷移為 `*/30 * * * *`、PUT 換排程 next_run_time 即時更新、無效格式 400 帶明確訊息
 - **Session Summary (2026-07-23, 後段)**: 依討論定案規格實作 resolver pipeline（wger.py 重構 + wger-mapping.yaml + db.delete_ref + sync.run_export 排程整合 + PyYAML）。過程中修復三個 wger 2.7 相容性問題（search 404 → catalog 比對；description_source 40 字元；duration-only set 降階為 repetition_unit=Seconds）。5/5 sessions 匯出、0 errors；孤兒 exercise 11 個與孤兒 session 2 個已清理
 - **Session Summary (2026-07-23, superset 修復)**: 使用者回報 routine 匯出無 superset。根因：hevy.py lowering 誤用 `supersets_id`（Hevy 實為 `superset_id`），group_key 全 None — 匯入端缺陷，FR-005 原冒煙測試用合成資料未攔到（LESSON: lowering 測試必須用真實 raw_archive payload）。連帶暴露第二缺陷：lowering 邏輯修正後內容變但來源 updated_at 不動，export_state 偵測不到 → put_doc_if_changed 加反向不變量（內容變+時間戳同 → 強制 bump）。修復後 raw_archive 全量重 lower、2 routines 重推：14 slots / 12 supersets（含 4 連、6 連 giant set）實測正確，preview 全零收斂
 - **Session Summary (2026-07-23, wger 重置 403)**: 使用者重置 wger 環境後 push 出現 unresolved exercise。根因：superuser 旗標隨 volume 消失，CreateResolver POST /exercise/ 403 被 resolve_exercise 吞成 log warning，錯誤訊息只剩通用 unresolved（假陰性）。修正：resolver 失敗原因傳播進 RuntimeError（403+CreateResolver 才附權限提示，避免假陽性）；doc 缺失改為獨立錯誤訊息。README 新增「wger 匯出前置」：預設 SMTP+email 驗證路線（prod.env: ENABLE_EMAIL/EMAIL_*/MIN_ACCOUNT_AGE_TO_TRUST=0），development fallback 升 superuser。LESSON: 使用者 /btw 訊息可能在中斷時遺失，補救來源為 ~/.claude/history.jsonl

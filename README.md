@@ -17,7 +17,8 @@ docker compose up -d --build
 open http://localhost:8080  # Web GUI；REST API 在 http://localhost:8000/docs
 ```
 
-金鑰也可留空，啟動後在 GUI 的 Settings 分頁設定。排程同步間隔預設 60 分鐘；
+金鑰也可留空，啟動後在 GUI 的 Settings 分頁設定。排程同步採 5 欄 crontab 格式
+（`SYNC_CRON`，預設 `0 * * * *` 每小時整點；GUI 修改即時生效，免重啟）；
 首次同步全量拉取，之後走 Hevy `/v1/workouts/events` 增量（含刪除傳播）。
 
 ## wger 匯出前置：帳號需具備 exercise 建立權限

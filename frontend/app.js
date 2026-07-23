@@ -157,12 +157,17 @@ document.getElementById("settings-form").addEventListener("submit", async (ev) =
   ev.preventDefault();
   const form = ev.target;
   const body = {};
-  for (const key of ["hevy_api_key", "wger_base_url", "wger_api_key", "sync_interval_minutes"]) {
+  for (const key of ["hevy_api_key", "wger_base_url", "wger_api_key", "sync_cron"]) {
     if (form.elements[key].value) body[key] = form.elements[key].value;
   }
-  await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
-  document.getElementById("settings-result").textContent = "saved ✓";
-  loadSettings();
+  const result = document.getElementById("settings-result");
+  try {
+    await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
+    result.textContent = "saved ✓";
+    loadSettings();
+  } catch (e) {
+    result.textContent = `error: ${e.message}`;
+  }
 });
 
 loadDashboard();

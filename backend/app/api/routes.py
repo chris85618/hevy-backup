@@ -9,6 +9,7 @@ from .. import config, db
 from ..connectors import EXPORTERS, IMPORTERS
 from ..connectors.wger import WgerExporter
 from ..ir.schema import DOC_TYPES, FITIR_VERSION
+from ..scheduler import apply_cron
 from ..services.sync import run_export, run_sync
 
 router = APIRouter(prefix="/api")
@@ -114,7 +115,7 @@ class SettingsUpdate(BaseModel):
     hevy_api_key: Optional[str] = None
     wger_base_url: Optional[str] = None
     wger_api_key: Optional[str] = None
-    sync_interval_minutes: Optional[str] = None
+    sync_cron: Optional[str] = None
 
 
 @router.get("/settings")
@@ -131,7 +132,14 @@ def get_settings() -> dict[str, str]:
 
 @router.put("/settings")
 def put_settings(update: SettingsUpdate) -> dict[str, str]:
-    for key, value in update.model_dump(exclude_none=True).items():
+    data = update.model_dump(exclude_none=True)
+    cron = data.get("sync_cron")
+    if cron:
+        try:
+            apply_cron(cron)  # validates the expression and reschedules live
+        except ValueError as exc:
+            raise HTTPException(400, f"invalid crontab expression: {exc}")
+    for key, value in data.items():
         if value and not value.endswith("****"):
             db.put_setting(key, value)
     return get_settings()

@@ -15,7 +15,7 @@
 | FR-006 | 進程規則統一模型 + DSL ext 保留 | R7 | ProgressionRule + ext.liftosaur | ir-spec.md §3.2 |
 | FR-007 | provenance refs + raw_archive | SSOT | db.py refs/raw_archive | 冒煙測試 2 |
 | FR-008 | 版本策略：additive minor + lazy major migration | BG-002 | ir/migrate.py | 冒煙測試 5 |
-| FR-020 | Hevy 定期拉取（排程 + 手動） | 任務 3 | services/sync.py + APScheduler | API 實測 /api/sync/run |
+| FR-020 | Hevy 定期拉取（排程 + 手動） | 任務 3 | services/sync.py + scheduler.py（crontab `sync_cron`，2026-07-23 由 interval 改制；PUT /settings 即時 reschedule，DEBT-003 解決） | API 實測 /api/sync/run；crontab 冒煙：legacy 遷移 + 即時 reschedule + 無效 400 |
 | FR-021 | 增量同步 + 刪除傳播 | FEA-041 | hevy.py _pull_workout_events | 程式碼審視（需真實金鑰整測） |
 | FR-022 | docker-compose 部署 | 任務 3 | docker-compose.yml | compose config valid（含無 .env） |
 | FR-023 | Web GUI（狀態/瀏覽/匯出/設定/映射） | 任務 3 | frontend/ | node --check + API 實測 |
