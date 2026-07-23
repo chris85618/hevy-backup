@@ -22,6 +22,18 @@
 - **決策**：frontend 僅消費 `/api/*` JSON；無 build 工具鏈（vanilla JS）。
 - **理由**：使用者明示前後端分離、資料匯出入清晰；vanilla 免去 node 建置層（YAGNI）；替換前端不影響資料流。
 
+## ADR-STR-006: 全面增量匯出 — export_state 變更偵測 + 刪除標記策略
+- **決策**（2026-07-23，使用者定案範圍）：wger push 從「僅新 session/weight」擴為全 IR 增量：session 新增/更新、plan（routine）、全部 body-metric、auto-created exercise 中繼資料回寫。
+- **變更偵測**：新表 `export_state(system, ir_kind, ir_id, pushed_updated_at)`；dirty = `doc.updated_at != pushed_updated_at`。升級前已推送的文件首次掃描時「認養為 clean」，避免歷史全量重推。配套：`db.put_doc_if_changed`（內容不變不動 `updated_at`，否則 body-metric 每次拉取都誤判 dirty；反向不變量：內容變了但來源時間戳沒動 → 強制 bump 到 now，否則 lowering 邏輯修正永遠推不出去，2026-07-23 superset 修復實證）；`now_iso` 升為微秒精度（同秒雙寫需可區分）；Hevy 刪除事件補 bump `updated_at`。
+- **Session 更新** = PATCH workoutsession + 刪舊 log（`?session=` 過濾 + 逐筆核對後才刪）+ 重建。順帶緩解 DEBT-004（重推可自癒部分匯出）。
+- **刪除策略**（使用者決策：備註標記）：Hevy 刪除的訓練不刪 wger 資料，僅在 notes 加 `[deleted in Hevy] ` 前綴；冪等（已有前綴不重複加）。
+- **Exercise 回寫**：僅回寫本橋自建者（以 `exercise_translation` ref 識別）；共享目錄項永不觸碰。限制：升級前 auto-create 的動作無 translation ref，不回寫。
+
+## ADR-STR-007: Plan → wger 2.7 routine 降階（有損）
+- **決策**：IR plan 匯為 `/routine/ + /day/ + /slot/ + /slot-entry/ + *-config`（iteration=1, operation=r, step=na，實測驗證）。更新 = DELETE routine（級聯已實測）後重建，拒絕 diff（Ockham）。
+- **有損映射**：wger config 為 per-entry，Hevy target 為 per-set → 取第一個有 target 的 set 供值；sets-config = set 數。duration-only 降為 repetition_unit=3（秒），與 workoutlog 同法。superset：連續同 group_key entry 共享一個 slot。
+- **常數**：routine name 截 25 字元、day name 截 20、notes 截 100；start=推送日、end=+70 天（wger 必填欄位，Hevy 無對應概念）。
+
 ## ADR-SEC-001: 金鑰處理
 - **決策**：金鑰來源 env 或 GUI 設定（存 DB settings 表，明文，檔案權限保護）；`.env`/`data/` 進 `.gitignore`；日誌不輸出金鑰。
 - **風險承認**：GUI 無認證（RISK-001，內網個人工具定位；公開部署需 nginx basic auth，文件已註明）。

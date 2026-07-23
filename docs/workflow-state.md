@@ -1,6 +1,6 @@
 # Workflow State
 
-- **Pipeline Position**: Phase 9 完成 — 真實資料端對端驗證通過：Hevy 拉取 → FitIR → wger push 全自動。5 sessions / 226 workoutlogs 已在 wger 實例上（archlinux.chrischen.org:9000），preview pending=0、unresolved=0
+- **Pipeline Position**: Phase 9 完成 — 全面增量匯出 (FR-028) 已實作並真實驗證：session 新增/更新/刪除標記、plan→routine、全 body-metric、exercise 回寫。wger 實例上 2 routines + 5 sessions/226 logs，preview 全零收斂
 - **Last Updated**: 2026-07-23
 - **Gate Status**: Stage 3-8 由使用者單一 prompt 預先授權通過；Phase 9 驗收標準（2026-07-23 規格）全數通過
 - **環境注意**:
@@ -13,7 +13,11 @@
   - RISK-001: Web GUI 無認證（內網定位，公開部署需 nginx basic auth）— 已於 adr.md ADR-SEC-001 揭露
   - DEBT-002 (P3): Liftosaur connector 未實作（IR 已預留 ext.liftosaur 與 refs 結構）
   - DEBT-003 (P3): sync_interval 變更需重啟後端才生效
-  - DEBT-004 (P2): wger session push 非交易性 — workoutsession 建立後若 log 中途失敗，ref 未寫入，重跑會另建新 session，遺留部分匯出的孤兒 session（2026-07-23 已手動清除 2 個；長期需 push 前偵測同日未 ref session 或失敗時回滾刪除）
+  - DEBT-004 (P3，已降級): wger session push 非交易性 — 新建路徑仍可能留孤兒 session，但 FR-028 更新重推路徑（刪 log 重建）可自癒部分匯出；殘餘風險僅剩「POST session 成功後 ref 寫入前中斷」窄窗
+  - DEBT-005 (P3): 升級前 auto-create 的 10 個 exercise 無 exercise_translation ref，不參與中繼資料回寫（僅此後新建者參與）
+  - DEBT-006 (P3): plan→routine 為有損降階（per-set target 取第一組、start/end 為合成日期，見 ADR-STR-007）；Hevy 刪除 routine 不傳播（Hevy API 無 routine 事件）
 - **已解決**:
   - DEBT-001 ✅ (2026-07-23): exercise 自動解析真實驗證 — 41 個 pending 動作 31 個 catalog 命中、10 個 create 自動建立（含 McGill改良式捲腹/RKC棒式/側棒式）；`/exercise/search/` 依賴已移除
 - **Session Summary (2026-07-23, 後段)**: 依討論定案規格實作 resolver pipeline（wger.py 重構 + wger-mapping.yaml + db.delete_ref + sync.run_export 排程整合 + PyYAML）。過程中修復三個 wger 2.7 相容性問題（search 404 → catalog 比對；description_source 40 字元；duration-only set 降階為 repetition_unit=Seconds）。5/5 sessions 匯出、0 errors；孤兒 exercise 11 個與孤兒 session 2 個已清理
+- **Session Summary (2026-07-23, superset 修復)**: 使用者回報 routine 匯出無 superset。根因：hevy.py lowering 誤用 `supersets_id`（Hevy 實為 `superset_id`），group_key 全 None — 匯入端缺陷，FR-005 原冒煙測試用合成資料未攔到（LESSON: lowering 測試必須用真實 raw_archive payload）。連帶暴露第二缺陷：lowering 邏輯修正後內容變但來源 updated_at 不動，export_state 偵測不到 → put_doc_if_changed 加反向不變量（內容變+時間戳同 → 強制 bump）。修復後 raw_archive 全量重 lower、2 routines 重推：14 slots / 12 supersets（含 4 連、6 連 giant set）實測正確，preview 全零收斂
+- **Session Summary (2026-07-23, FR-028)**: 全面增量匯出實作（ADR-STR-006/007）。使用者定案：四範圍全做、刪除採備註標記。新增 export_state 變更偵測 + put_doc_if_changed + now_iso 微秒化（同秒雙寫 bug 左移修正）+ hevy 模板刷新/刪除事件 bump。真實驗證：2 routines 匯出（18 slots/day，superset 分組正確）、模擬編輯 1 session 更新重建 32 logs、0 errors、preview 收斂全零。既有已推送文件以 backfill 認養避免歷史重推

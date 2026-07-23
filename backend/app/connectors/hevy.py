@@ -80,30 +80,44 @@ class HevyImporter:
     # --- lowering ---------------------------------------------------------
 
     def _exercise_ir_id(self, template: dict[str, Any]) -> str:
-        """Merge-or-create the exercise dictionary entry (ir-spec.md §3.1)."""
-        existing = db.find_ref(SYSTEM, "exercise_template", template["id"])
-        if existing:
-            return existing
-        ir_id = f"exr_{slugify(template.get('title', template['id']))}"
-        doc = db.get_doc("exercise", ir_id)
+        """Merge-or-create the exercise dictionary entry (ir-spec.md §3.1).
+
+        Existing docs are refreshed from the template so metadata edits in
+        Hevy (name, muscles, equipment) reach the IR — and, via updated_at,
+        downstream exporters. The workout lowering path passes a stub with
+        only id/title; fields the template doesn't carry stay untouched."""
+        ir_id = db.find_ref(SYSTEM, "exercise_template", template["id"])
+        doc = db.get_doc("exercise", ir_id) if ir_id else None
+        if doc is None:
+            ir_id = f"exr_{slugify(template.get('title', template['id']))}"
+            doc = db.get_doc("exercise", ir_id)
         if doc is None:
             doc = {
                 "fitir": FITIR_VERSION, "kind": "exercise", "id": ir_id,
-                "refs": [], "ext": {},
-                "name": template.get("title", ""),
-                "aliases": [],
-                "metric_kind": METRIC_KINDS.get(template.get("type"), "weight_reps"),
-                "primary_muscles": [m for m in [template.get("primary_muscle_group")] if m],
-                "secondary_muscles": template.get("secondary_muscle_groups") or [],
-                "equipment_category": template.get("equipment_category") or "none",
-                "is_custom": bool(template.get("is_custom")),
-                "updated_at": db.now_iso(),
+                "refs": [], "ext": {}, "name": "", "aliases": [],
+                "metric_kind": "weight_reps", "primary_muscles": [],
+                "secondary_muscles": [], "equipment_category": "none",
+                "is_custom": False,
             }
+        if template.get("title"):
+            doc["name"] = template["title"]
+        if template.get("type"):
+            doc["metric_kind"] = METRIC_KINDS.get(template["type"], "weight_reps")
+        if "primary_muscle_group" in template:
+            doc["primary_muscles"] = [
+                m for m in [template.get("primary_muscle_group")] if m]
+        if "secondary_muscle_groups" in template:
+            doc["secondary_muscles"] = template.get("secondary_muscle_groups") or []
+        if "equipment_category" in template:
+            doc["equipment_category"] = template.get("equipment_category") or "none"
+        if "is_custom" in template:
+            doc["is_custom"] = bool(template.get("is_custom"))
         refs = [r for r in doc.get("refs", []) if not (
             r["system"] == SYSTEM and r["kind"] == "exercise_template")]
         refs.append({"system": SYSTEM, "id": template["id"], "kind": "exercise_template"})
         doc["refs"] = refs
-        db.put_doc(doc)
+        doc["updated_at"] = db.now_iso()
+        db.put_doc_if_changed(doc)
         db.put_ref(SYSTEM, "exercise_template", template["id"], "exercise", ir_id)
         return ir_id
 
@@ -148,8 +162,8 @@ class HevyImporter:
                 "order": ex.get("index", 0),
                 "exercise_id": self._exercise_id_for_title(
                     ex.get("exercise_template_id", ""), ex.get("title", "")),
-                "group_key": (None if ex.get("supersets_id") is None
-                              else f"ss{ex['supersets_id']}"),
+                "group_key": (None if ex.get("superset_id") is None
+                              else f"ss{ex['superset_id']}"),
                 "notes": ex.get("notes") or "",
                 "sets": sets,
             })
@@ -196,8 +210,8 @@ class HevyImporter:
                 "order": ex.get("index", 0),
                 "exercise_id": self._exercise_id_for_title(
                     ex.get("exercise_template_id", ""), ex.get("title", "")),
-                "group_key": (None if ex.get("supersets_id") is None
-                              else f"ss{ex['supersets_id']}"),
+                "group_key": (None if ex.get("superset_id") is None
+                              else f"ss{ex['superset_id']}"),
                 "rest": ({"value": float(rest), "unit": "s"} if rest else None),
                 "notes": ex.get("notes") or "",
                 "sets": sets, "progression": [],
@@ -254,7 +268,7 @@ class HevyImporter:
             for r in self._paged(client, "/routines", "routines"):
                 db.archive_raw(SYSTEM, "routine", r["id"], r)
                 doc = self.lower_routine(r, folders)
-                db.put_doc(doc)
+                db.put_doc_if_changed(doc)
                 db.put_ref(SYSTEM, "routine", r["id"], "plan", doc["id"])
                 summary["routines"] += 1
 
@@ -269,7 +283,7 @@ class HevyImporter:
             for m in self._paged(client, "/body_measurements", "measurements"):
                 db.archive_raw(SYSTEM, "body_measurement", m["date"], m)
                 for doc in self.lower_body_measurement(m):
-                    db.put_doc(doc)
+                    db.put_doc_if_changed(doc)
                     summary["body_metrics"] += 1
 
         db.put_setting("hevy_last_sync", sync_started)
@@ -278,7 +292,7 @@ class HevyImporter:
     def _store_workout(self, w: dict[str, Any]) -> None:
         db.archive_raw(SYSTEM, "workout", w["id"], w)
         doc = self.lower_workout(w)
-        db.put_doc(doc)
+        db.put_doc_if_changed(doc)
         db.put_ref(SYSTEM, "workout", w["id"], "session", doc["id"])
 
     def _pull_workout_events(self, client: httpx.Client, since: str,
@@ -293,5 +307,7 @@ class HevyImporter:
                     doc = db.get_doc("session", ir_id)
                     if doc and not doc.get("deleted_at"):
                         doc["deleted_at"] = event.get("deleted_at") or db.now_iso()
+                        # bump updated_at so exporters see the tombstone
+                        doc["updated_at"] = db.now_iso()
                         db.put_doc(doc)
                         summary["deleted"] += 1

@@ -1,8 +1,21 @@
 """wger exporter: lowers FitIR into wger's normalized write model.
 
-session      -> POST /workoutsession/ + one /workoutlog/ per set (R1)
+session      -> POST /workoutsession/ + one /workoutlog/ per set (R1);
+                updates PATCH the session and rebuild its logs; sessions
+                deleted in Hevy get a "[deleted in Hevy]" notes prefix
+                (user decision 2026-07-23: never auto-delete on wger)
+plan         -> /routine/ + /day/ + /slot/ + /slot-entry/ + *-config
+                (wger 2.7 model); updates delete-recreate the routine
 body-metric  -> weight goes to /weightentry/; other metric_keys go to
                 auto-created /measurement-category/ + /measurement/ (R9)
+exercise     -> auto-created exercises get name/muscle/equipment written
+                back when their IR doc changes (shared catalog entries
+                are never touched)
+
+Change detection: export_state stores the doc's updated_at at push time;
+a doc is pushed when it has no ref yet or its updated_at moved on
+(ADR-STR-006). Docs pushed before export_state existed are adopted as
+clean on first sight.
 
 Exercise resolution runs a configurable pipeline (data/wger-mapping.yaml):
 manual (refs table / GUI) -> override (yaml) -> catalog (local match against
@@ -15,7 +28,8 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Any, Optional
+from datetime import date, timedelta
+from typing import Any, Iterable, Optional
 
 import httpx
 import yaml
@@ -26,6 +40,8 @@ from ..ir.schema import rpe_to_rir
 log = logging.getLogger(__name__)
 
 SYSTEM = "wger"
+
+DELETED_PREFIX = "[deleted in Hevy] "
 
 MAPPING_PATH = os.path.join(os.path.dirname(config.DB_PATH), "wger-mapping.yaml")
 
@@ -146,9 +162,9 @@ class CreateResolver:
         for key in _name_keys(name, ALL_VARIANTS):  # dedupe within/across runs
             if key in catalog:
                 return str(catalog[key])
-        resp = client.post("/exercise/", json={
-            "category": self.defaults.get("category", 10),
-        })
+        payload: dict[str, Any] = {"category": self.defaults.get("category", 10)}
+        payload.update(self.exp.exercise_taxonomy_fields(client, doc))
+        resp = client.post("/exercise/", json=payload)
         resp.raise_for_status()
         exercise_id = int(resp.json()["id"])
         resp = client.post("/exercise-translation/", json={
@@ -164,6 +180,9 @@ class CreateResolver:
                 " data export"),
         })
         resp.raise_for_status()
+        # remember our own creations: only these get metadata write-back
+        db.put_ref(SYSTEM, "exercise_translation", str(resp.json()["id"]),
+                   "exercise", doc["id"])
         for key in _name_keys(name, ALL_VARIANTS):
             catalog.setdefault(key, exercise_id)
         self.exp.audit["created_exercises"].append(
@@ -188,6 +207,9 @@ class WgerExporter:
         self.api_key = db.get_setting("wger_api_key")
         self.mapping = load_mapping()  # re-read every run, no cross-run cache
         self._catalog: Optional[dict[str, int]] = None
+        self._categories: Optional[dict[str, Any]] = None
+        self._muscles: Optional[dict[str, int]] = None
+        self._equipment: Optional[dict[str, int]] = None
         self.audit: dict[str, list] = {"created_exercises": [],
                                        "invalidated_refs": []}
         self._pipeline = []
@@ -292,16 +314,122 @@ class WgerExporter:
             return effort["value"]
         return rpe_to_rir(effort["value"])  # derived (ir-spec.md §4.4)
 
+    # --- taxonomy lookups (muscle / equipment / measurement category) ------
+
+    def _vocab(self, client: httpx.Client, path: str,
+               fields: tuple[str, ...]) -> dict[str, Any]:
+        resp = client.get(f"{path}?limit=100")
+        resp.raise_for_status()
+        vocab: dict[str, Any] = {}
+        for row in resp.json()["results"]:
+            for field in fields:
+                name = (row.get(field) or "").strip().lower()
+                if name:
+                    vocab.setdefault(name, row["id"])
+        return vocab
+
+    def exercise_taxonomy_fields(self, client: httpx.Client,
+                                 doc: dict[str, Any]) -> dict[str, Any]:
+        """Map IR muscle/equipment names onto wger ids; unmatched names are
+        skipped (Hevy vocabulary is broader than wger's)."""
+        if self._muscles is None:
+            self._muscles = self._vocab(client, "/muscle/", ("name_en", "name"))
+        if self._equipment is None:
+            self._equipment = self._vocab(client, "/equipment/", ("name",))
+
+        def muscle_ids(names: Optional[list[str]]) -> list[int]:
+            out = []
+            for n in names or []:
+                mid = self._muscles.get(n.replace("_", " ").strip().lower())
+                if mid is not None:
+                    out.append(mid)
+            return out
+
+        fields: dict[str, Any] = {}
+        primary = muscle_ids(doc.get("primary_muscles"))
+        secondary = muscle_ids(doc.get("secondary_muscles"))
+        if primary:
+            fields["muscles"] = primary
+        if secondary:
+            fields["muscles_secondary"] = secondary
+        equip = self._equipment.get(
+            (doc.get("equipment_category") or "").replace("_", " ").strip().lower())
+        if equip is not None:
+            fields["equipment"] = [equip]
+        return fields
+
+    # --- change detection (ADR-STR-006) ------------------------------------
+
+    def _status(self, ir_kind: str, doc: dict[str, Any],
+                ref_kind: str) -> Optional[str]:
+        """None = clean, "new" = never pushed, "changed" = pushed but stale.
+
+        Docs pushed before export_state existed are adopted as clean on
+        first sight so the upgrade doesn't re-push the whole history."""
+        if not db.find_external(SYSTEM, ref_kind, doc["id"]):
+            return "new"
+        state = db.get_export_state(SYSTEM, ir_kind, doc["id"])
+        current = doc.get("updated_at") or ""
+        if state is None:
+            db.put_export_state(SYSTEM, ir_kind, doc["id"], current)
+            return None
+        return None if state == current else "changed"
+
+    def _mark_pushed(self, ir_kind: str, doc: dict[str, Any]) -> None:
+        db.put_export_state(SYSTEM, ir_kind, doc["id"],
+                            doc.get("updated_at") or "")
+
+    # --- work lists ---------------------------------------------------------
+
+    def _session_work(self) -> dict[str, list[dict[str, Any]]]:
+        work: dict[str, list[dict[str, Any]]] = {
+            "create": [], "update": [], "mark_deleted": []}
+        for s in db.list_docs("session", include_deleted=True):
+            if s.get("deleted_at"):
+                # no backfill here: pre-upgrade pushes must still get marked
+                if (db.find_external(SYSTEM, "workoutsession", s["id"])
+                        and db.get_export_state(SYSTEM, "session", s["id"])
+                        != (s.get("updated_at") or "")):
+                    work["mark_deleted"].append(s)
+                continue
+            status = self._status("session", s, "workoutsession")
+            if status == "new":
+                work["create"].append(s)
+            elif status == "changed":
+                work["update"].append(s)
+        return work
+
+    def _plan_work(self) -> list[dict[str, Any]]:
+        return [p for p in db.list_docs("plan")
+                if self._status("plan", p, "routine")]
+
+    def _body_metric_work(self) -> dict[str, list[tuple[str, dict[str, Any]]]]:
+        work: dict[str, list[tuple[str, dict[str, Any]]]] = {
+            "weight": [], "measurement": []}
+        for m in db.list_docs("body-metric"):
+            is_weight = m["metric_key"] == "weight"
+            status = self._status(
+                "body-metric", m, "weightentry" if is_weight else "measurement")
+            if status:
+                work["weight" if is_weight else "measurement"].append((status, m))
+        return work
+
+    def _exercise_update_work(
+            self, exercises: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        return [doc for doc in exercises.values()
+                if db.find_external(SYSTEM, "exercise_translation", doc["id"])
+                and self._status("exercise", doc, "exercise") == "changed"]
+
+    @staticmethod
+    def _session_exercise_ids(sessions: Iterable[dict[str, Any]]) -> set[str]:
+        return {ex["exercise_id"] for s in sessions for ex in s["exercises"]}
+
+    @staticmethod
+    def _plan_exercise_ids(plans: Iterable[dict[str, Any]]) -> set[str]:
+        return {e["exercise_id"] for p in plans
+                for d in p["days"] for e in d["entries"]}
+
     # --- preview / push ----------------------------------------------------
-
-    def _pending_sessions(self) -> list[dict[str, Any]]:
-        return [s for s in db.list_docs("session")
-                if not db.find_external(SYSTEM, "workoutsession", s["id"])]
-
-    def _pending_weights(self) -> list[dict[str, Any]]:
-        return [m for m in db.list_docs("body-metric")
-                if m["metric_key"] == "weight"
-                and not db.find_external(SYSTEM, "weightentry", m["id"])]
 
     def preview(self) -> dict[str, Any]:
         """Side-effect free towards wger: never creates exercises."""
@@ -313,8 +441,10 @@ class WgerExporter:
             pass
         has_create = any(isinstance(r, CreateResolver) for r in self._pipeline)
         unresolved, will_create = [], []
-        sessions = self._pending_sessions()
-        needed = {ex["exercise_id"] for s in sessions for ex in s["exercises"]}
+        work = self._session_work()
+        plans = self._plan_work()
+        needed = (self._session_exercise_ids(work["create"] + work["update"])
+                  | self._plan_exercise_ids(plans))
         for ir_id in sorted(needed):
             doc = exercises.get(ir_id)
             if doc is not None and self.resolve_exercise(
@@ -325,43 +455,59 @@ class WgerExporter:
                 will_create.append(item)
             else:
                 unresolved.append(item)
+        metrics = self._body_metric_work()
         if client:
             client.close()
         return {
             "configured": client is not None,
-            "pending_sessions": len(sessions),
-            "pending_weight_entries": len(self._pending_weights()),
+            "pending_sessions": len(work["create"]),
+            "updated_sessions": len(work["update"]),
+            "sessions_to_mark_deleted": len(work["mark_deleted"]),
+            "pending_plans": len(plans),
+            "pending_weight_entries": len(metrics["weight"]),
+            "pending_measurements": len(metrics["measurement"]),
+            "pending_exercise_updates": len(self._exercise_update_work(exercises)),
             "unresolved_exercises": unresolved,
             "will_create_exercises": will_create,
         }
 
     def push(self) -> dict[str, Any]:
         exercises = {e["id"]: e for e in db.list_docs("exercise")}
-        report: dict[str, Any] = {"sessions_exported": 0, "logs_exported": 0,
-                                  "weights_exported": 0, "errors": []}
+        report: dict[str, Any] = {
+            "sessions_exported": 0, "sessions_updated": 0,
+            "sessions_marked_deleted": 0, "logs_exported": 0,
+            "plans_exported": 0, "weights_exported": 0,
+            "measurements_exported": 0, "exercises_updated": 0,
+            "errors": [],
+        }
         with self._client() as client:
-            pending = self._pending_sessions()
-            needed = {ex["exercise_id"] for s in pending
-                      for ex in s["exercises"]}
+            work = self._session_work()
+            plans = self._plan_work()
+            needed = (self._session_exercise_ids(work["create"] + work["update"])
+                      | self._plan_exercise_ids(plans))
             self._revalidate_refs(client, needed)
-            for session in pending:
+            for session in work["create"]:
                 try:
                     self._push_session(client, session, exercises, report)
                 except (httpx.HTTPError, RuntimeError) as exc:
                     report["errors"].append(f"session {session['id']}: {exc}")
-            for metric in self._pending_weights():
+            for session in work["update"]:
                 try:
-                    resp = client.post("/weightentry/", json={
-                        "date": metric["at"],
-                        "weight": str(metric["quantity"]["value"]),
-                    })
-                    resp.raise_for_status()
-                    db.put_ref(SYSTEM, "weightentry",
-                               str(resp.json().get("id", metric["at"])),
-                               "body-metric", metric["id"])
-                    report["weights_exported"] += 1
+                    self._update_session(client, session, exercises, report)
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    report["errors"].append(f"session {session['id']}: {exc}")
+            for session in work["mark_deleted"]:
+                try:
+                    self._mark_deleted_session(client, session, report)
                 except httpx.HTTPError as exc:
-                    report["errors"].append(f"weight {metric['id']}: {exc}")
+                    report["errors"].append(f"session {session['id']}: {exc}")
+            for plan in plans:
+                try:
+                    self._push_plan(client, plan, exercises, report)
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    report["errors"].append(f"plan {plan['id']}: {exc}")
+            self._push_body_metrics(client, report)
+            self._push_exercise_updates(client, exercises, report)
         report.update(self.audit)
         return report
 
@@ -384,35 +530,42 @@ class WgerExporter:
                 resp = client.post("/workoutlog/", json=log_payload)
         return resp
 
-    def _push_session(self, client: httpx.Client, session: dict[str, Any],
-                      exercises: dict[str, dict[str, Any]],
-                      report: dict[str, Any]) -> None:
+    def _resolve_all(self, client: httpx.Client, ir_ids: Iterable[str],
+                     exercises: dict[str, dict[str, Any]]) -> dict[str, str]:
         resolved: dict[str, str] = {}
-        for ex in session["exercises"]:
-            doc = exercises.get(ex["exercise_id"])
+        for ir_id in ir_ids:
+            if ir_id in resolved:
+                continue
+            doc = exercises.get(ir_id)
             wger_id = self.resolve_exercise(client, doc) if doc else None
             if wger_id is None:
                 raise RuntimeError(
-                    f"unresolved exercise {ex['exercise_id']} after pipeline")
-            resolved[ex["exercise_id"]] = wger_id
+                    f"unresolved exercise {ir_id} after pipeline")
+            resolved[ir_id] = wger_id
+        return resolved
 
-        date = (session.get("started_at") or "")[:10]
-        payload: dict[str, Any] = {"date": date, "notes": session.get("notes") or ""}
+    @staticmethod
+    def _session_payload(session: dict[str, Any]) -> dict[str, Any]:
+        payload: dict[str, Any] = {"date": (session.get("started_at") or "")[:10],
+                                   "notes": session.get("notes") or ""}
         if session.get("started_at") and "T" in session["started_at"]:
             payload["time_start"] = session["started_at"].split("T")[1][:8]
         if session.get("ended_at") and "T" in session["ended_at"]:
             payload["time_end"] = session["ended_at"].split("T")[1][:8]
-        resp = client.post("/workoutsession/", json=payload)
-        resp.raise_for_status()
-        wger_session_id = resp.json().get("id")
+        return payload
 
+    def _write_logs(self, client: httpx.Client, session: dict[str, Any],
+                    wger_session_id: Any,
+                    exercises: dict[str, dict[str, Any]],
+                    resolved: dict[str, str], report: dict[str, Any]) -> None:
+        date_str = (session.get("started_at") or "")[:10]
         for ex in session["exercises"]:
             for s in ex["sets"]:
                 actual = s.get("actual", {})
                 log_payload: dict[str, Any] = {
                     "session": wger_session_id,
                     "exercise": int(resolved[ex["exercise_id"]]),
-                    "date": session.get("started_at") or date,
+                    "date": session.get("started_at") or date_str,
                 }
                 if actual.get("reps") is not None:
                     log_payload["repetitions"] = str(actual["reps"])
@@ -431,6 +584,271 @@ class WgerExporter:
                 resp.raise_for_status()
                 report["logs_exported"] += 1
 
+    def _push_session(self, client: httpx.Client, session: dict[str, Any],
+                      exercises: dict[str, dict[str, Any]],
+                      report: dict[str, Any]) -> None:
+        resolved = self._resolve_all(
+            client, [ex["exercise_id"] for ex in session["exercises"]], exercises)
+        resp = client.post("/workoutsession/", json=self._session_payload(session))
+        resp.raise_for_status()
+        wger_session_id = resp.json().get("id")
+        self._write_logs(client, session, wger_session_id,
+                         exercises, resolved, report)
         db.put_ref(SYSTEM, "workoutsession", str(wger_session_id),
                    "session", session["id"])
+        self._mark_pushed("session", session)
         report["sessions_exported"] += 1
+
+    def _update_session(self, client: httpx.Client, session: dict[str, Any],
+                        exercises: dict[str, dict[str, Any]],
+                        report: dict[str, Any]) -> None:
+        """Re-sync an already-exported session: PATCH the session row, then
+        rebuild its logs (delete + recreate; simpler and more robust than
+        diffing set lists, and it heals partial exports — DEBT-004)."""
+        wger_session_id = db.find_external(SYSTEM, "workoutsession",
+                                           session["id"])
+        # resolve before deleting anything so failures leave wger untouched
+        resolved = self._resolve_all(
+            client, [ex["exercise_id"] for ex in session["exercises"]], exercises)
+        resp = client.patch(f"/workoutsession/{wger_session_id}/",
+                            json=self._session_payload(session))
+        if resp.status_code == 404:  # deleted on wger side: create afresh
+            db.delete_ref(SYSTEM, "workoutsession", session["id"])
+            self._push_session(client, session, exercises, report)
+            return
+        resp.raise_for_status()
+        self._delete_session_logs(client, wger_session_id)
+        self._write_logs(client, session, wger_session_id,
+                         exercises, resolved, report)
+        self._mark_pushed("session", session)
+        report["sessions_updated"] += 1
+
+    def _delete_session_logs(self, client: httpx.Client,
+                             wger_session_id: Any) -> None:
+        while True:
+            resp = client.get(f"/workoutlog/?session={wger_session_id}&limit=100")
+            resp.raise_for_status()
+            results = resp.json()["results"]
+            deleted = 0
+            for entry in results:
+                # never trust the server-side filter blindly before deleting
+                if str(entry.get("session")) != str(wger_session_id):
+                    continue
+                client.delete(f"/workoutlog/{entry['id']}/").raise_for_status()
+                deleted += 1
+            if not results or deleted == 0:
+                return
+
+    def _mark_deleted_session(self, client: httpx.Client,
+                              session: dict[str, Any],
+                              report: dict[str, Any]) -> None:
+        """Hevy deletion policy (user decision): keep the wger session but
+        prefix its notes so it is recognizable; never auto-delete."""
+        wger_session_id = db.find_external(SYSTEM, "workoutsession",
+                                           session["id"])
+        resp = client.get(f"/workoutsession/{wger_session_id}/")
+        if resp.status_code != 404:
+            resp.raise_for_status()
+            notes = resp.json().get("notes") or ""
+            if not notes.startswith(DELETED_PREFIX):
+                client.patch(
+                    f"/workoutsession/{wger_session_id}/",
+                    json={"notes": DELETED_PREFIX + notes},
+                ).raise_for_status()
+        self._mark_pushed("session", session)
+        report["sessions_marked_deleted"] += 1
+
+    # --- plans -> wger routines (wger 2.7 model) ----------------------------
+
+    @staticmethod
+    def _slot_groups(entries: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """Consecutive entries sharing a group_key (superset) share one slot."""
+        groups: list[list[dict[str, Any]]] = []
+        prev_key: Any = object()
+        for entry in sorted(entries, key=lambda e: e.get("order", 0)):
+            key = entry.get("group_key")
+            if key is not None and key == prev_key:
+                groups[-1].append(entry)
+            else:
+                groups.append([entry])
+            prev_key = key
+        return groups
+
+    def _push_plan(self, client: httpx.Client, plan: dict[str, Any],
+                   exercises: dict[str, dict[str, Any]],
+                   report: dict[str, Any]) -> None:
+        """Create (or delete-recreate on update) a wger routine. DELETE
+        cascades days/slots/entries/configs, so recreate beats diffing."""
+        resolved = self._resolve_all(
+            client, sorted(self._plan_exercise_ids([plan])), exercises)
+        old = db.find_external(SYSTEM, "routine", plan["id"])
+        if old:
+            resp = client.delete(f"/routine/{old}/")
+            if resp.status_code != 404:
+                resp.raise_for_status()
+        start = date.today()
+        resp = client.post("/routine/", json={
+            "name": (plan.get("name") or plan["id"])[:25],
+            "description": (plan.get("description") or "")[:1000],
+            "start": start.isoformat(),
+            "end": (start + timedelta(days=70)).isoformat(),
+        })
+        resp.raise_for_status()
+        routine_id = resp.json()["id"]
+        for day in sorted(plan["days"], key=lambda d: d.get("order", 0)):
+            resp = client.post("/day/", json={
+                "routine": routine_id,
+                "name": (day.get("name") or "Day")[:20],
+                "order": day.get("order", 0) + 1,
+                "is_rest": bool(day.get("is_rest")),
+                "type": "custom",
+            })
+            resp.raise_for_status()
+            day_id = resp.json()["id"]
+            if day.get("is_rest"):
+                continue
+            for slot_order, group in enumerate(
+                    self._slot_groups(day.get("entries") or []), start=1):
+                resp = client.post("/slot/", json={"day": day_id,
+                                                   "order": slot_order})
+                resp.raise_for_status()
+                slot_id = resp.json()["id"]
+                for pos, entry in enumerate(group, start=1):
+                    self._push_slot_entry(client, slot_id, pos, entry, resolved)
+        db.put_ref(SYSTEM, "routine", str(routine_id), "plan", plan["id"])
+        self._mark_pushed("plan", plan)
+        report["plans_exported"] += 1
+
+    def _push_slot_entry(self, client: httpx.Client, slot_id: int, order: int,
+                         entry: dict[str, Any],
+                         resolved: dict[str, str]) -> None:
+        """Lossy lowering: wger configs are per-entry, Hevy targets are
+        per-set, so the first set with a target provides the numbers."""
+        sets = entry.get("sets") or []
+        target = next((s.get("target") for s in sets if s.get("target")), None) or {}
+        reps = target.get("reps") or {}
+        duration = target.get("duration")
+        payload: dict[str, Any] = {
+            "slot": slot_id,
+            "exercise": int(resolved[entry["exercise_id"]]),
+            "order": order,
+            "comment": (entry.get("notes") or "")[:100],
+        }
+        if reps.get("min") is None and reps.get("max") is None and duration:
+            payload["repetition_unit"] = 3  # Seconds, like duration-only logs
+        resp = client.post("/slot-entry/", json=payload)
+        resp.raise_for_status()
+        entry_id = resp.json()["id"]
+
+        def config(endpoint: str, value: Any) -> None:
+            client.post(f"/{endpoint}/", json={
+                "slot_entry": entry_id, "iteration": 1, "value": str(value),
+                "operation": "r", "step": "na",
+            }).raise_for_status()
+
+        if sets:
+            config("sets-config", len(sets))
+        if reps.get("min") is not None:
+            config("repetitions-config", reps["min"])
+            if reps.get("max") is not None and reps["max"] != reps["min"]:
+                config("max-repetitions-config", reps["max"])
+        elif duration:
+            config("repetitions-config", duration["value"])
+        if target.get("weight"):
+            config("weight-config", target["weight"]["value"])
+        if entry.get("rest"):
+            config("rest-config", entry["rest"]["value"])
+        rir = self._rir(target.get("effort"))
+        if rir is not None:
+            config("rir-config", min(9.0, round(rir * 2) / 2))
+
+    # --- body metrics -------------------------------------------------------
+
+    def _measurement_categories(self, client: httpx.Client) -> dict[str, Any]:
+        if self._categories is None:
+            self._categories = self._vocab(
+                client, "/measurement-category/", ("name",))
+        return self._categories
+
+    def _push_body_metrics(self, client: httpx.Client,
+                           report: dict[str, Any]) -> None:
+        work = self._body_metric_work()
+        for status, m in work["weight"]:
+            try:
+                payload = {"date": m["at"],
+                           "weight": str(m["quantity"]["value"])}
+                ext = db.find_external(SYSTEM, "weightentry", m["id"])
+                if status == "changed" and ext:
+                    resp = client.patch(f"/weightentry/{ext}/", json=payload)
+                    if resp.status_code == 404:
+                        db.delete_ref(SYSTEM, "weightentry", m["id"])
+                        resp = client.post("/weightentry/", json=payload)
+                else:
+                    resp = client.post("/weightentry/", json=payload)
+                resp.raise_for_status()
+                db.put_ref(SYSTEM, "weightentry",
+                           str(resp.json().get("id", m["at"])),
+                           "body-metric", m["id"])
+                self._mark_pushed("body-metric", m)
+                report["weights_exported"] += 1
+            except httpx.HTTPError as exc:
+                report["errors"].append(f"weight {m['id']}: {exc}")
+        for status, m in work["measurement"]:
+            try:
+                categories = self._measurement_categories(client)
+                cat_id = categories.get(m["metric_key"].lower())
+                if cat_id is None:
+                    resp = client.post("/measurement-category/", json={
+                        "name": m["metric_key"][:100],
+                        "unit": m["quantity"]["unit"][:30],
+                    })
+                    resp.raise_for_status()
+                    cat_id = resp.json()["id"]
+                    categories[m["metric_key"].lower()] = cat_id
+                payload = {"category": cat_id, "date": m["at"],
+                           "value": str(m["quantity"]["value"]),
+                           "notes": m.get("notes") or ""}
+                ext = db.find_external(SYSTEM, "measurement", m["id"])
+                if status == "changed" and ext:
+                    resp = client.patch(f"/measurement/{ext}/", json=payload)
+                    if resp.status_code == 404:
+                        db.delete_ref(SYSTEM, "measurement", m["id"])
+                        resp = client.post("/measurement/", json=payload)
+                else:
+                    resp = client.post("/measurement/", json=payload)
+                resp.raise_for_status()
+                db.put_ref(SYSTEM, "measurement", str(resp.json()["id"]),
+                           "body-metric", m["id"])
+                self._mark_pushed("body-metric", m)
+                report["measurements_exported"] += 1
+            except httpx.HTTPError as exc:
+                report["errors"].append(f"measurement {m['id']}: {exc}")
+
+    # --- exercise metadata write-back ---------------------------------------
+
+    def _push_exercise_updates(self, client: httpx.Client,
+                               exercises: dict[str, dict[str, Any]],
+                               report: dict[str, Any]) -> None:
+        """Only exercises this bridge created (exercise_translation ref)
+        are written back; shared catalog entries stay untouched."""
+        for doc in self._exercise_update_work(exercises):
+            try:
+                translation_id = db.find_external(
+                    SYSTEM, "exercise_translation", doc["id"])
+                resp = client.patch(
+                    f"/exercise-translation/{translation_id}/",
+                    json={"name": doc.get("name") or doc["id"]})
+                if resp.status_code == 404:  # translation gone remotely
+                    db.delete_ref(SYSTEM, "exercise_translation", doc["id"])
+                    self._mark_pushed("exercise", doc)
+                    continue
+                resp.raise_for_status()
+                wger_id = db.find_external(SYSTEM, "exercise", doc["id"])
+                fields = self.exercise_taxonomy_fields(client, doc)
+                if fields and wger_id:
+                    client.patch(f"/exercise/{wger_id}/",
+                                 json=fields).raise_for_status()
+                self._mark_pushed("exercise", doc)
+                report["exercises_updated"] += 1
+            except httpx.HTTPError as exc:
+                report["errors"].append(f"exercise {doc['id']}: {exc}")

@@ -28,6 +28,10 @@ CREATE TABLE IF NOT EXISTS refs(
   ir_kind TEXT NOT NULL, ir_id TEXT NOT NULL,
   PRIMARY KEY(system, kind, external_id));
 CREATE INDEX IF NOT EXISTS refs_by_ir ON refs(ir_kind, ir_id);
+CREATE TABLE IF NOT EXISTS export_state(
+  system TEXT NOT NULL, ir_kind TEXT NOT NULL, ir_id TEXT NOT NULL,
+  pushed_updated_at TEXT NOT NULL,
+  PRIMARY KEY(system, ir_kind, ir_id));
 CREATE TABLE IF NOT EXISTS raw_archive(
   system TEXT NOT NULL, kind TEXT NOT NULL, external_id TEXT NOT NULL,
   fetched_at TEXT NOT NULL, payload TEXT NOT NULL,
@@ -41,7 +45,9 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # microseconds: updated_at doubles as export-state change marker, so two
+    # writes inside the same second must not produce equal timestamps
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def init() -> None:
@@ -76,6 +82,25 @@ def put_doc(body: dict[str, Any]) -> None:
              json.dumps(body, ensure_ascii=False), body.get("updated_at") or now_iso()),
         )
         _db().commit()
+
+
+def put_doc_if_changed(body: dict[str, Any]) -> bool:
+    """Write only when content (ignoring updated_at) differs from the stored
+    doc. Keeps updated_at stable across no-op re-pulls so exporters' change
+    detection (export_state) doesn't fire spuriously."""
+    existing = get_doc(body["kind"], body["id"])
+    if existing is not None:
+        stored = {k: v for k, v in existing.items() if k != "updated_at"}
+        incoming = {k: v for k, v in body.items() if k != "updated_at"}
+        if stored == incoming:
+            return False
+        if body.get("updated_at") == existing.get("updated_at"):
+            # invariant: a content change must move updated_at, or exporters
+            # never see it — happens when our lowering logic changes while
+            # the source system's timestamp stays put
+            body["updated_at"] = now_iso()
+    put_doc(body)
+    return True
 
 
 def get_doc(kind: str, doc_id: str) -> Optional[dict[str, Any]]:
@@ -137,6 +162,28 @@ def find_external(system: str, kind: str, ir_id: str) -> Optional[str]:
         (system, kind, ir_id),
     ).fetchone()
     return row["external_id"] if row else None
+
+
+# --- export state (per-exporter change detection) --------------------------
+
+def get_export_state(system: str, ir_kind: str, ir_id: str) -> Optional[str]:
+    row = _db().execute(
+        "SELECT pushed_updated_at FROM export_state"
+        " WHERE system=? AND ir_kind=? AND ir_id=?",
+        (system, ir_kind, ir_id),
+    ).fetchone()
+    return row["pushed_updated_at"] if row else None
+
+
+def put_export_state(system: str, ir_kind: str, ir_id: str,
+                     pushed_updated_at: str) -> None:
+    with _lock:
+        _db().execute(
+            "INSERT OR REPLACE INTO export_state"
+            "(system, ir_kind, ir_id, pushed_updated_at) VALUES(?,?,?,?)",
+            (system, ir_kind, ir_id, pushed_updated_at),
+        )
+        _db().commit()
 
 
 # --- raw archive (provenance only, never a read path) ----------------------
