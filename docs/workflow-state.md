@@ -1,6 +1,6 @@
 # Workflow State
 
-- **Pipeline Position**: Phase 9 完成 — 全面增量匯出 (FR-028) 已實作並真實驗證：session 新增/更新/刪除標記、plan→routine、全 body-metric、exercise 回寫。wger 實例上 2 routines + 5 sessions/226 logs，preview 全零收斂
+- **Pipeline Position**: Phase 9 完成 — 全面增量匯出 (FR-028) + session↔routine 關聯 (ADR-STR-007 修訂) 已實作並真實驗證：wger 實例上 4/5 sessions 關聯正確 routine、194/226 logs 帶 routine（32 筆屬無 plan 的 07-14 session，正確），preview 全零收斂
 - **Last Updated**: 2026-07-23
 - **Gate Status**: Stage 3-8 由使用者單一 prompt 預先授權通過；Phase 9 驗收標準（2026-07-23 規格）全數通過
 - **環境注意**:
@@ -21,4 +21,5 @@
 - **Session Summary (2026-07-23, 後段)**: 依討論定案規格實作 resolver pipeline（wger.py 重構 + wger-mapping.yaml + db.delete_ref + sync.run_export 排程整合 + PyYAML）。過程中修復三個 wger 2.7 相容性問題（search 404 → catalog 比對；description_source 40 字元；duration-only set 降階為 repetition_unit=Seconds）。5/5 sessions 匯出、0 errors；孤兒 exercise 11 個與孤兒 session 2 個已清理
 - **Session Summary (2026-07-23, superset 修復)**: 使用者回報 routine 匯出無 superset。根因：hevy.py lowering 誤用 `supersets_id`（Hevy 實為 `superset_id`），group_key 全 None — 匯入端缺陷，FR-005 原冒煙測試用合成資料未攔到（LESSON: lowering 測試必須用真實 raw_archive payload）。連帶暴露第二缺陷：lowering 邏輯修正後內容變但來源 updated_at 不動，export_state 偵測不到 → put_doc_if_changed 加反向不變量（內容變+時間戳同 → 強制 bump）。修復後 raw_archive 全量重 lower、2 routines 重推：14 slots / 12 supersets（含 4 連、6 連 giant set）實測正確，preview 全零收斂
 - **Session Summary (2026-07-23, wger 重置 403)**: 使用者重置 wger 環境後 push 出現 unresolved exercise。根因：superuser 旗標隨 volume 消失，CreateResolver POST /exercise/ 403 被 resolve_exercise 吞成 log warning，錯誤訊息只剩通用 unresolved（假陰性）。修正：resolver 失敗原因傳播進 RuntimeError（403+CreateResolver 才附權限提示，避免假陽性）；doc 缺失改為獨立錯誤訊息。README 新增「wger 匯出前置」：預設 SMTP+email 驗證路線（prod.env: ENABLE_EMAIL/EMAIL_*/MIN_ACCOUNT_AGE_TO_TRUST=0），development fallback 升 superuser。LESSON: 使用者 /btw 訊息可能在中斷時遺失，補救來源為 ~/.claude/history.jsonl
+- **Session Summary (2026-07-23, session↔routine 關聯)**: 使用者問 fresh wger 全量匯出後 Calendar 紀錄是否關聯 routines。分析結論：不會 — (1) `_session_payload` 從未送 `routine` 欄位（IR 的 `plan_id` 在匯出端被丟棄，匯入端 hevy.py 有正確保留）；(2) push 順序 sessions 先於 plans，fresh instance 上 session 建立時 routine ref 尚不存在；(3) logs 也無 routine。修復時排除地雷：wger `WorkoutSession.routine` 為 CASCADE，原 plan 更新的 delete-recreate 會在關聯建立後刪光 sessions+logs → 改 PATCH 就地更新 + 只重建 days。另處理 unique(date,user,routine) 衝突 fallback。真實驗證：強制重推後 4/5 sessions 正確關聯（07-14 無 plan 者為 null，正確）、routine id 穩定 (1,2)、slots/supersets 結構不變 (7+7 slots)、0 errors、preview 收斂全零
 - **Session Summary (2026-07-23, FR-028)**: 全面增量匯出實作（ADR-STR-006/007）。使用者定案：四範圍全做、刪除採備註標記。新增 export_state 變更偵測 + put_doc_if_changed + now_iso 微秒化（同秒雙寫 bug 左移修正）+ hevy 模板刷新/刪除事件 bump。真實驗證：2 routines 匯出（18 slots/day，superset 分組正確）、模擬編輯 1 session 更新重建 32 logs、0 errors、preview 收斂全零。既有已推送文件以 backfill 認養避免歷史重推

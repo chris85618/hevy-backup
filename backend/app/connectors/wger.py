@@ -1,11 +1,15 @@
 """wger exporter: lowers FitIR into wger's normalized write model.
 
 session      -> POST /workoutsession/ + one /workoutlog/ per set (R1);
-                updates PATCH the session and rebuild its logs; sessions
-                deleted in Hevy get a "[deleted in Hevy]" notes prefix
-                (user decision 2026-07-23: never auto-delete on wger)
+                linked to its routine via plan_id (plans push first so the
+                ref exists); updates PATCH the session and rebuild its
+                logs; sessions deleted in Hevy get a "[deleted in Hevy]"
+                notes prefix (user decision 2026-07-23: never auto-delete)
 plan         -> /routine/ + /day/ + /slot/ + /slot-entry/ + *-config
-                (wger 2.7 model); updates delete-recreate the routine
+                (wger 2.7 model); updates PATCH the routine in place and
+                rebuild only its days — WorkoutSession.routine is
+                on_delete=CASCADE, so delete-recreate would wipe every
+                linked session and its logs
 body-metric  -> weight goes to /weightentry/; other metric_keys go to
                 auto-created /measurement-category/ + /measurement/ (R9)
 exercise     -> auto-created exercises get name/muscle/equipment written
@@ -501,6 +505,13 @@ class WgerExporter:
             needed = (self._session_exercise_ids(work["create"] + work["update"])
                       | self._plan_exercise_ids(plans))
             self._revalidate_refs(client, needed)
+            # plans go first: sessions link to their routine, so on a fresh
+            # instance the routine refs must exist before sessions push
+            for plan in plans:
+                try:
+                    self._push_plan(client, plan, exercises, report)
+                except (httpx.HTTPError, RuntimeError) as exc:
+                    report["errors"].append(f"plan {plan['id']}: {exc}")
             for session in work["create"]:
                 try:
                     self._push_session(client, session, exercises, report)
@@ -516,11 +527,6 @@ class WgerExporter:
                     self._mark_deleted_session(client, session, report)
                 except httpx.HTTPError as exc:
                     report["errors"].append(f"session {session['id']}: {exc}")
-            for plan in plans:
-                try:
-                    self._push_plan(client, plan, exercises, report)
-                except (httpx.HTTPError, RuntimeError) as exc:
-                    report["errors"].append(f"plan {plan['id']}: {exc}")
             self._push_body_metrics(client, report)
             self._push_exercise_updates(client, exercises, report)
         report.update(self.audit)
@@ -567,16 +573,32 @@ class WgerExporter:
     def _session_payload(session: dict[str, Any]) -> dict[str, Any]:
         payload: dict[str, Any] = {"date": (session.get("started_at") or "")[:10],
                                    "notes": session.get("notes") or ""}
+        if session.get("plan_id"):
+            routine = db.find_external(SYSTEM, "routine", session["plan_id"])
+            if routine:
+                payload["routine"] = routine
         if session.get("started_at") and "T" in session["started_at"]:
             payload["time_start"] = session["started_at"].split("T")[1][:8]
         if session.get("ended_at") and "T" in session["ended_at"]:
             payload["time_end"] = session["ended_at"].split("T")[1][:8]
         return payload
 
+    @staticmethod
+    def _send_session(client: httpx.Client, method: str, url: str,
+                      payload: dict[str, Any]) -> httpx.Response:
+        """wger enforces unique (date, user, routine): a second workout of
+        the same routine on one day stays unlinked instead of failing."""
+        resp = client.request(method, url, json=payload)
+        if resp.status_code == 400 and "routine" in payload:
+            payload = {k: v for k, v in payload.items() if k != "routine"}
+            resp = client.request(method, url, json=payload)
+        return resp
+
     def _write_logs(self, client: httpx.Client, session: dict[str, Any],
                     wger_session_id: Any,
                     exercises: dict[str, dict[str, Any]],
-                    resolved: dict[str, str], report: dict[str, Any]) -> None:
+                    resolved: dict[str, str], report: dict[str, Any],
+                    routine: Any = None) -> None:
         date_str = (session.get("started_at") or "")[:10]
         for ex in session["exercises"]:
             for s in ex["sets"]:
@@ -586,6 +608,8 @@ class WgerExporter:
                     "exercise": int(resolved[ex["exercise_id"]]),
                     "date": session.get("started_at") or date_str,
                 }
+                if routine is not None:
+                    log_payload["routine"] = routine
                 if actual.get("reps") is not None:
                     log_payload["repetitions"] = str(actual["reps"])
                 elif actual.get("duration"):
@@ -608,11 +632,12 @@ class WgerExporter:
                       report: dict[str, Any]) -> None:
         resolved = self._resolve_all(
             client, [ex["exercise_id"] for ex in session["exercises"]], exercises)
-        resp = client.post("/workoutsession/", json=self._session_payload(session))
+        resp = self._send_session(client, "POST", "/workoutsession/",
+                                  self._session_payload(session))
         resp.raise_for_status()
         wger_session_id = resp.json().get("id")
-        self._write_logs(client, session, wger_session_id,
-                         exercises, resolved, report)
+        self._write_logs(client, session, wger_session_id, exercises, resolved,
+                         report, routine=resp.json().get("routine"))
         db.put_ref(SYSTEM, "workoutsession", str(wger_session_id),
                    "session", session["id"])
         self._mark_pushed("session", session)
@@ -629,16 +654,17 @@ class WgerExporter:
         # resolve before deleting anything so failures leave wger untouched
         resolved = self._resolve_all(
             client, [ex["exercise_id"] for ex in session["exercises"]], exercises)
-        resp = client.patch(f"/workoutsession/{wger_session_id}/",
-                            json=self._session_payload(session))
+        resp = self._send_session(client, "PATCH",
+                                  f"/workoutsession/{wger_session_id}/",
+                                  self._session_payload(session))
         if resp.status_code == 404:  # deleted on wger side: create afresh
             db.delete_ref(SYSTEM, "workoutsession", session["id"])
             self._push_session(client, session, exercises, report)
             return
         resp.raise_for_status()
         self._delete_session_logs(client, wger_session_id)
-        self._write_logs(client, session, wger_session_id,
-                         exercises, resolved, report)
+        self._write_logs(client, session, wger_session_id, exercises, resolved,
+                         report, routine=resp.json().get("routine"))
         self._mark_pushed("session", session)
         report["sessions_updated"] += 1
 
@@ -693,27 +719,54 @@ class WgerExporter:
             prev_key = key
         return groups
 
+    def _delete_routine_days(self, client: httpx.Client,
+                             routine_id: Any) -> None:
+        """/day/ has no routine filter in wger 2.7, so match client-side.
+        Day DELETE cascades slots/entries/configs; sessions only reference
+        the routine, never a day, so they survive the rebuild."""
+        day_ids, url = [], "/day/?limit=100"
+        while url:
+            resp = client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+            day_ids += [d["id"] for d in data["results"]
+                        if str(d.get("routine")) == str(routine_id)]
+            url = data["next"]
+            if url:
+                url = url.split("/api/v2", 1)[1]
+        for day_id in day_ids:
+            client.delete(f"/day/{day_id}/").raise_for_status()
+
     def _push_plan(self, client: httpx.Client, plan: dict[str, Any],
                    exercises: dict[str, dict[str, Any]],
                    report: dict[str, Any]) -> None:
-        """Create (or delete-recreate on update) a wger routine. DELETE
-        cascades days/slots/entries/configs, so recreate beats diffing."""
+        """Create a wger routine, or update it in place: PATCH the routine
+        row and rebuild only its days. The routine row itself must survive
+        because WorkoutSession.routine is on_delete=CASCADE — deleting it
+        would take every linked session (and its logs) with it."""
         resolved = self._resolve_all(
             client, sorted(self._plan_exercise_ids([plan])), exercises)
-        old = db.find_external(SYSTEM, "routine", plan["id"])
-        if old:
-            resp = client.delete(f"/routine/{old}/")
-            if resp.status_code != 404:
-                resp.raise_for_status()
         start = date.today()
-        resp = client.post("/routine/", json={
+        routine_payload = {
             "name": (plan.get("name") or plan["id"])[:25],
             "description": (plan.get("description") or "")[:1000],
             "start": start.isoformat(),
             "end": (start + timedelta(days=70)).isoformat(),
-        })
-        resp.raise_for_status()
-        routine_id = resp.json()["id"]
+        }
+        routine_id = None
+        old = db.find_external(SYSTEM, "routine", plan["id"])
+        if old:
+            resp = client.patch(f"/routine/{old}/", json=routine_payload)
+            if resp.status_code == 404:  # deleted on wger side
+                db.delete_ref(SYSTEM, "routine", plan["id"])
+            else:
+                resp.raise_for_status()
+                routine_id = resp.json()["id"]
+                self._delete_routine_days(client, routine_id)
+        if routine_id is None:
+            resp = client.post("/routine/", json=routine_payload)
+            resp.raise_for_status()
+            routine_id = resp.json()["id"]
         for day in sorted(plan["days"], key=lambda d: d.get("order", 0)):
             resp = client.post("/day/", json={
                 "routine": routine_id,

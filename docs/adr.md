@@ -30,7 +30,9 @@
 - **Exercise 回寫**：僅回寫本橋自建者（以 `exercise_translation` ref 識別）；共享目錄項永不觸碰。限制：升級前 auto-create 的動作無 translation ref，不回寫。
 
 ## ADR-STR-007: Plan → wger 2.7 routine 降階（有損）
-- **決策**：IR plan 匯為 `/routine/ + /day/ + /slot/ + /slot-entry/ + *-config`（iteration=1, operation=r, step=na，實測驗證）。更新 = DELETE routine（級聯已實測）後重建，拒絕 diff（Ockham）。
+- **決策**：IR plan 匯為 `/routine/ + /day/ + /slot/ + /slot-entry/ + *-config`（iteration=1, operation=r, step=na，實測驗證）。更新 = PATCH routine 本體 + 刪除其 days 後重建（day 級聯 slots/entries/configs），拒絕 diff（Ockham）。
+- **修訂**（2026-07-23，session↔routine 關聯修復）：原「DELETE routine 後重建」已廢棄 — wger `WorkoutSession.routine` 為 `on_delete=CASCADE`，刪 routine 會連帶刪除所有已關聯 session 與其 logs。routine row 必須存活以保持 id 穩定。`/day/` 無 routine filter（wger 2.7 filterset 未含），改為抓取使用者全部 days 後 client 端比對刪除。
+- **Session 關聯**：session 匯出時帶 `routine`（來自 IR `plan_id` → routine ref；push 順序改為 plans 先於 sessions，fresh instance 全量匯出時 ref 才存在）；workoutlog 帶 session 實際連結的 routine（以 wger 回應為準）。wger 有 unique(date, user, routine) 約束：同 routine 同日第二個 session 於 400 時退回不關聯（`_send_session` fallback），不使匯出失敗。
 - **有損映射**：wger config 為 per-entry，Hevy target 為 per-set → 取第一個有 target 的 set 供值；sets-config = set 數。duration-only 降為 repetition_unit=3（秒），與 workoutlog 同法。superset：連續同 group_key entry 共享一個 slot。
 - **常數**：routine name 截 25 字元、day name 截 20、notes 截 100；start=推送日、end=+70 天（wger 必填欄位，Hevy 無對應概念）。
 
