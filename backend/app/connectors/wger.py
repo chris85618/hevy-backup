@@ -20,8 +20,10 @@ clean on first sight.
 Exercise resolution runs a configurable pipeline (data/wger-mapping.yaml):
 manual (refs table / GUI) -> override (yaml) -> catalog (local match against
 /exercise-translation/ + /exercisealias/; /exercise/search/ is gone in
-wger >= 2.7) -> create (auto-create, always succeeds). Stale refs are
-re-validated before push and on workoutlog 400.
+wger >= 2.7) -> create (auto-create; wger only allows it for "trustworthy"
+accounts: superuser, or verified email + account age past
+MIN_ACCOUNT_AGE_TO_TRUST — otherwise POST /exercise/ is 403). Stale refs
+are re-validated before push and on workoutlog 400.
 """
 from __future__ import annotations
 
@@ -210,6 +212,7 @@ class WgerExporter:
         self._categories: Optional[dict[str, Any]] = None
         self._muscles: Optional[dict[str, int]] = None
         self._equipment: Optional[dict[str, int]] = None
+        self.resolve_failures: dict[str, list[str]] = {}
         self.audit: dict[str, list] = {"created_exercises": [],
                                        "invalidated_refs": []}
         self._pipeline = []
@@ -275,6 +278,7 @@ class WgerExporter:
     def resolve_exercise(self, client: Optional[httpx.Client],
                          exercise_doc: dict[str, Any],
                          allow_create: bool = True) -> Optional[str]:
+        failures: list[str] = []
         for resolver in self._pipeline:
             if not allow_create and isinstance(resolver, CreateResolver):
                 continue
@@ -283,11 +287,22 @@ class WgerExporter:
             except httpx.HTTPError as exc:
                 log.warning("%s resolver failed for %s: %s",
                             type(resolver).__name__, exercise_doc["id"], exc)
+                reason = f"{type(resolver).__name__}: {exc}"
+                if (isinstance(resolver, CreateResolver)
+                        and isinstance(exc, httpx.HTTPStatusError)
+                        and exc.response.status_code == 403):
+                    reason += (" — wger account may not create exercises;"
+                               " it must be trustworthy (superuser, or"
+                               " verified email + account age over"
+                               " MIN_ACCOUNT_AGE_TO_TRUST); see README"
+                               " 'wger 匯出前置'")
+                failures.append(reason)
                 continue
             if wger_id:
                 db.put_ref(SYSTEM, "exercise", wger_id,
                            "exercise", exercise_doc["id"])
                 return wger_id
+        self.resolve_failures[exercise_doc["id"]] = failures
         return None
 
     def _revalidate_refs(self, client: httpx.Client,
@@ -537,10 +552,14 @@ class WgerExporter:
             if ir_id in resolved:
                 continue
             doc = exercises.get(ir_id)
-            wger_id = self.resolve_exercise(client, doc) if doc else None
+            if doc is None:
+                raise RuntimeError(f"exercise {ir_id} not found in IR store")
+            wger_id = self.resolve_exercise(client, doc)
             if wger_id is None:
+                detail = "; ".join(self.resolve_failures.get(ir_id, []))
                 raise RuntimeError(
-                    f"unresolved exercise {ir_id} after pipeline")
+                    f"unresolved exercise {ir_id} after pipeline"
+                    + (f" ({detail})" if detail else ""))
             resolved[ir_id] = wger_id
         return resolved
 
