@@ -1,6 +1,6 @@
 # Workflow State
 
-- **Pipeline Position**: Phase 9 進行中 — 容器已啟動，frontend 403 已修復（Dockerfile chmod 644），HTTP 200 驗證通過；待使用者以真實 HEVY_API_KEY 驗證同步功能
+- **Pipeline Position**: Phase 9 進行中 — 容器已啟動，frontend 403 已修復（Dockerfile chmod 644），HTTP 200 驗證通過；image 已命名為 chris85618/hevy-bridge-{backend,frontend}:latest 可 push Docker Hub；待使用者以真實 HEVY_API_KEY 驗證同步功能
 - **Last Updated**: 2026-07-23
 - **Gate Status**: Stage 3-8 由使用者單一 prompt 預先授權通過；Phase 9 HITL 待決 — 剩餘：真實 HEVY_API_KEY 同步驗證
 - **環境注意**: 使用者 Docker 為 legacy builder（無 BuildKit），Dockerfile 禁用 `COPY --chmod`，需以 `RUN chmod` 替代
