@@ -9,8 +9,8 @@ services:
       - DB_PATH=/data/fitir.db
     volumes:
       - ./data:/data
-    ports:
-      - "8000:8000"   # direct API access (frontend/backend are separable)
+    # ports:
+    #   - "8000:8000"   # direct API access (frontend/backend are separable)
     restart: unless-stopped
 
   frontend:
