@@ -186,6 +186,15 @@ def put_export_state(system: str, ir_kind: str, ir_id: str,
         _db().commit()
 
 
+def clear_export_state(system: str) -> int:
+    """Re-baseline an exporter: every ref'd doc turns "changed" and the
+    idempotent upsert paths rebuild it (heals a reset wger instance)."""
+    with _lock:
+        cur = _db().execute("DELETE FROM export_state WHERE system=?", (system,))
+        _db().commit()
+        return cur.rowcount
+
+
 # --- raw archive (provenance only, never a read path) ----------------------
 
 def archive_raw(system: str, kind: str, external_id: str, payload: Any) -> None:

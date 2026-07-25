@@ -24,7 +24,7 @@
 
 ## ADR-STR-006: 全面增量匯出 — export_state 變更偵測 + 刪除標記策略
 - **決策**（2026-07-23，使用者定案範圍）：wger push 從「僅新 session/weight」擴為全 IR 增量：session 新增/更新、plan（routine）、全部 body-metric、auto-created exercise 中繼資料回寫。
-- **變更偵測**：新表 `export_state(system, ir_kind, ir_id, pushed_updated_at)`；dirty = `doc.updated_at != pushed_updated_at`。升級前已推送的文件首次掃描時「認養為 clean」，避免歷史全量重推。配套：`db.put_doc_if_changed`（內容不變不動 `updated_at`，否則 body-metric 每次拉取都誤判 dirty；反向不變量：內容變了但來源時間戳沒動 → 強制 bump 到 now，否則 lowering 邏輯修正永遠推不出去，2026-07-23 superset 修復實證）；`now_iso` 升為微秒精度（同秒雙寫需可區分）；Hevy 刪除事件補 bump `updated_at`。
+- **變更偵測**：新表 `export_state(system, ir_kind, ir_id, pushed_updated_at)`；dirty = `doc.updated_at != pushed_updated_at`。~~升級前已推送的文件首次掃描時「認養為 clean」，避免歷史全量重推~~（認養機制已由 ADR-STR-008 廢除：它無法區分「升級前推過」與「半途失敗」，會把 partial push 永久凍結；升級遷移已於 2026-07-23 完成，認養分支只剩陷阱面）。配套：`db.put_doc_if_changed`（內容不變不動 `updated_at`，否則 body-metric 每次拉取都誤判 dirty；反向不變量：內容變了但來源時間戳沒動 → 強制 bump 到 now，否則 lowering 邏輯修正永遠推不出去，2026-07-23 superset 修復實證）；`now_iso` 升為微秒精度（同秒雙寫需可區分）；Hevy 刪除事件補 bump `updated_at`。
 - **Session 更新** = PATCH workoutsession + 刪舊 log（`?session=` 過濾 + 逐筆核對後才刪）+ 重建。順帶緩解 DEBT-004（重推可自癒部分匯出）。
 - **刪除策略**（使用者決策：備註標記）：Hevy 刪除的訓練不刪 wger 資料，僅在 notes 加 `[deleted in Hevy] ` 前綴；冪等（已有前綴不重複加）。
 - **Exercise 回寫**：僅回寫本橋自建者（以 `exercise_translation` ref 識別）；共享目錄項永不觸碰。限制：升級前 auto-create 的動作無 translation ref，不回寫。
@@ -36,6 +36,17 @@
 - **修訂**（2026-07-23，template 語意對齊，FR-029）：概念修正 — Hevy routine 是「訓練時即時取用的敏捷範本」，語意對應 wger 的 **template**（`is_template=True` 的 routine），不是 wger 的行事曆型執行 routine。因此每個 plan 推送**兩棵** routine 樹：(1) template（ref kind `template`，`is_template=True`，凍結的範本，對應 wger UI 的 Templates 清單）；(2) 執行 routine（ref kind `routine`，`is_template=False`），等同使用者「用 template 建立計畫」，session 與 workoutlog 全部掛在執行 routine 上（延用既有 `routine` ref kind，故既有實例零遷移 — 已掛 session 的舊 routine 就地 PATCH 成執行 routine，template 新建補齊；`_plan_work` 對缺 template ref 的 plan 觸發一次性重推）。執行 routine 日期範圍 = 該 plan 最早 session 日 → 今日+70 天（受 wger `MAX_DURATION_DAYS=120` 限制，過長時 start 向後截斷；真正的日誌關聯是 FK 不是日期窗）。實測 (2026-07-23)：templates 6/7 建立（各 1 day/7 slots，superset 結構同執行 routine）、執行 routine 1/2 就地轉換（is_template=False、start 回溯至 07-18/07-19）、194 logs 與 4 sessions 關聯不動、0 errors、preview 收斂全零。
 - **有損映射**：wger config 為 per-entry，Hevy target 為 per-set → 取第一個有 target 的 set 供值；sets-config = set 數。duration-only 降為 repetition_unit=3（秒），與 workoutlog 同法。superset：連續同 group_key entry 共享一個 slot。
 - **常數**：routine name 截 25 字元、day name 截 20、notes 截 100；template 的 start=推送日、end=+70 天（wger 必填欄位，template 凍結後日期無實質作用）。
+
+## ADR-STR-008: 收斂式匯出狀態機 — 最終一致性取代原子性
+- **背景**（2026-07-25，使用者實驗發現）：純排程自動化（無人工監督首推）會產生不可逆 partial sync。三個根因：(1) `_status` 的「認養為 clean」分支把半推送文件（ref 已寫、export_state 缺）永久凍結；(2) `_push_session` 在 logs 全寫完後才寫 ref，logs 中途失敗留下 wger 孤兒 session，下輪重試 POST 撞 unique(date,user,routine) 400 → `_send_session` fallback 剝掉 routine → 產生永久脫鉤的重複件；(3) `hevy_last_sync` 一次性寫死且無強制全量入口，狀態污染後只能砍掉重來。
+- **決策**（使用者定案方向：增量 + timestamp-based snapshot、pull/push 狀態解耦、最終一致性優於原子操作）：
+  - **語意分離**：`refs` = 身分（wger 物件已存在，防重複建立）；`export_state` = 完成度（整份文件完整落地當下的 `updated_at` 快照）。ref 存在但 export_state 缺/落後 → 一律 "changed"，走冪等 update 路徑重推。認養分支移除。
+  - **ref 前移**：`_push_session` 在 POST workoutsession 成功後、寫 logs 前就寫 ref。logs 失敗時下輪以同一 wger session 走 `_update_session`（PATCH + 刪 log 重建）自癒，不再產生孤兒或脫鉤重複件。
+  - **不變量**：任何一次成功的 push run ⇒ wger 反映 pull 端最新快照（最終一致性）。失敗只能讓文件停留在 dirty，永不得轉為 clean。
+  - **pull/push 解耦**：`hevy_last_sync`（producer 水位）與 `export_state`（consumer 游標）互不影響；push 失敗不阻擋 pull 前進，pull 照常推進水位。
+  - **重建基線逃生口**：`POST /api/sync/run?full=true`（清水位重走全量拉取）、`POST /api/export/wger?force=true`（`db.clear_export_state` 全轉 dirty，經冪等 upsert + PATCH-404-recreate 重落地，wger 實例被重置也能自癒，免換 bridge）。
+- **取捨**：拒絕交易性/原子匯出（wger API 無交易能力，模擬原子性需補償邏輯且仍有窗口）；接受「wger 短暫存在 half-pushed 文件」換取任意時點可重入收斂。升級成本：極舊 DB（refs 有、export_state 無）首輪會全量冪等重推一次 — 這正是修正後的正確行為。
+- **驗證**：離線收斂測試 18/18（scratchpad test_convergence.py，FakeWger 模擬）：logs 中途失敗 → 下輪 update 自癒無重複件；plan 半推送 → 重推非認養；force → 冪等重落地；各劇本後均靜默收斂。
 
 ## ADR-SEC-001: 金鑰處理
 - **決策**：金鑰來源 env 或 GUI 設定（存 DB settings 表，明文，檔案權限保護）；`.env`/`data/` 進 `.gitignore`；日誌不輸出金鑰。

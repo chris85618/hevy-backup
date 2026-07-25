@@ -21,10 +21,13 @@ exercise     -> auto-created exercises get name/muscle/equipment written
                 back when their IR doc changes (shared catalog entries
                 are never touched)
 
-Change detection: export_state stores the doc's updated_at at push time;
-a doc is pushed when it has no ref yet or its updated_at moved on
-(ADR-STR-006). Docs pushed before export_state existed are adopted as
-clean on first sight.
+Change detection (ADR-STR-006/008): export_state stores the doc's
+updated_at at push time and is only written after the whole doc landed;
+refs are written as soon as the wger object exists. A doc is pushed when
+it has no ref yet ("new") or its export_state doesn't match updated_at
+("changed" — covers both edits and interrupted pushes). Every push is
+idempotent (PATCH-or-recreate + rebuild), so any later successful run
+converges wger onto the latest pulled snapshot (eventual consistency).
 
 Exercise resolution runs a configurable pipeline (data/wger-mapping.yaml):
 manual (refs table / GUI) -> override (yaml) -> catalog (local match against
@@ -388,16 +391,16 @@ class WgerExporter:
                 ref_kind: str) -> Optional[str]:
         """None = clean, "new" = never pushed, "changed" = pushed but stale.
 
-        Docs pushed before export_state existed are adopted as clean on
-        first sight so the upgrade doesn't re-push the whole history."""
+        A ref only proves identity (the wger object exists); export_state
+        proves completion (the whole doc landed). A ref without matching
+        export_state is an interrupted push — report "changed" so the
+        idempotent update path re-pushes it. Adopting it as clean here
+        would freeze a half-pushed doc forever (the pre-scheduler partial
+        sync trap)."""
         if not db.find_external(SYSTEM, ref_kind, doc["id"]):
             return "new"
         state = db.get_export_state(SYSTEM, ir_kind, doc["id"])
-        current = doc.get("updated_at") or ""
-        if state is None:
-            db.put_export_state(SYSTEM, ir_kind, doc["id"], current)
-            return None
-        return None if state == current else "changed"
+        return None if state == (doc.get("updated_at") or "") else "changed"
 
     def _mark_pushed(self, ir_kind: str, doc: dict[str, Any]) -> None:
         db.put_export_state(SYSTEM, ir_kind, doc["id"],
@@ -644,10 +647,14 @@ class WgerExporter:
                                   self._session_payload(session))
         resp.raise_for_status()
         wger_session_id = resp.json().get("id")
-        self._write_logs(client, session, wger_session_id, exercises, resolved,
-                         report, routine=resp.json().get("routine"))
+        # ref before logs: if a log write fails, the next run finds the ref
+        # (status "changed") and heals via _update_session's log rebuild
+        # instead of POSTing a duplicate that the unique (date, user,
+        # routine) fallback would strip the routine link from
         db.put_ref(SYSTEM, "workoutsession", str(wger_session_id),
                    "session", session["id"])
+        self._write_logs(client, session, wger_session_id, exercises, resolved,
+                         report, routine=resp.json().get("routine"))
         self._mark_pushed("session", session)
         report["sessions_exported"] += 1
 

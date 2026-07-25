@@ -37,10 +37,11 @@ def status() -> dict[str, Any]:
 
 
 @router.post("/sync/run")
-def sync_now(connector: str = "hevy") -> dict[str, Any]:
+def sync_now(connector: str = "hevy", full: bool = False) -> dict[str, Any]:
+    """full=true clears the incremental watermark and re-pulls everything."""
     if connector not in IMPORTERS:
         raise HTTPException(404, f"unknown importer: {connector}")
-    return run_sync(connector)
+    return run_sync(connector, full=full)
 
 
 @router.get("/documents/{kind}")
@@ -88,8 +89,10 @@ def wger_preview() -> dict[str, Any]:
 
 
 @router.post("/export/wger")
-def wger_push() -> dict[str, Any]:
-    result = run_export("wger")
+def wger_push(force: bool = False) -> dict[str, Any]:
+    """force=true re-baselines: clears export_state so every ref'd doc is
+    re-pushed through the idempotent upsert paths (heals a reset wger)."""
+    result = run_export("wger", force=force)
     if result["status"] == "error":
         raise HTTPException(400, result["error"])
     if result["status"] == "already_running":

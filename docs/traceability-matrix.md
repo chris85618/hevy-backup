@@ -25,6 +25,7 @@
 | FR-026 | 擴充新 app N+M | ADR-STR-001 | connectors/base.py + registry | architecture.md §3 |
 | FR-028 | 全面增量匯出：session 更新/刪除標記、plan→routine、全 body-metric、exercise 回寫 | FR-025, R1, R9, ADR-STR-006/007 | db.py export_state + connectors/wger.py + connectors/hevy.py | 離線冒煙 24/24；真實 wger 實測 (2026-07-23)：2 routines 匯出、1 session 更新重建 32 logs、0 errors、preview 收斂全零 |
 | FR-029 | Hevy routine ≙ wger template：plan 推 template（is_template）+ 執行 routine 雙樹；日誌掛執行 routine | FR-028, ADR-STR-007 修訂 | connectors/wger.py `_push_plan`/`_upsert_routine`/`_exec_dates` | 真實 wger 實測 (2026-07-23)：templates 6/7 建立、routines 1/2 就地轉執行態（start 回溯訓練首日）、194 logs/4 sessions 關聯不動、preview 收斂全零 |
-| ADR-STR-001~007, ADR-SEC-001 | 架構決策 | FR-* | docs/adr.md | — |
+| FR-030 | 收斂式匯出狀態機：refs=身分/export_state=完成度、失敗永不轉 clean、任一成功 push 收斂至最新快照；`?full=true`/`?force=true` 重建基線 | FR-028, ADR-STR-008, DEBT-004 | connectors/wger.py `_status`/`_push_session` + db.clear_export_state + services/sync.py + api/routes.py | 離線收斂測試 18/18 (2026-07-25)：中斷 session 自癒無重複件、半推送 plan 重推非認養、force 冪等重落地、各劇本後靜默收斂 |
+| ADR-STR-001~008, ADR-SEC-001 | 架構決策 | FR-* | docs/adr.md | — |
 | RISK-001 | GUI 無認證 | ADR-SEC-001 | workflow-state.md | open, MEDIUM |
-| DEBT-001~004 | 見 workflow-state.md | — | — | DEBT-004 已由 FR-028 緩解（更新重推自癒）；餘 active |
+| DEBT-001~004 | 見 workflow-state.md | — | — | DEBT-004 已由 FR-030 解決（ref 前移 + update 路徑自癒，孤兒/脫鉤重複件路徑消除）；餘 active |

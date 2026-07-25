@@ -12,13 +12,15 @@ log = logging.getLogger(__name__)
 _sync_lock = threading.Lock()
 
 
-def run_sync(connector: str = "hevy") -> dict:
+def run_sync(connector: str = "hevy", full: bool = False) -> dict:
     if connector not in IMPORTERS:
         raise ValueError(f"unknown importer: {connector}")
     if not _sync_lock.acquire(blocking=False):
         return {"status": "already_running"}
     run_id = db.start_run(connector)
     try:
+        if full:  # re-baseline: forget the watermark, pull everything again
+            db.put_setting(f"{connector}_last_sync", "")
         summary = IMPORTERS[connector]().pull()
         db.finish_run(run_id, "success", json.dumps(summary))
         return {"status": "success", "summary": summary}
@@ -30,7 +32,7 @@ def run_sync(connector: str = "hevy") -> dict:
         _sync_lock.release()
 
 
-def run_export(exporter: str = "wger") -> dict:
+def run_export(exporter: str = "wger", force: bool = False) -> dict:
     """Push through a registered exporter; audit report into sync_runs."""
     if exporter not in EXPORTERS:
         raise ValueError(f"unknown exporter: {exporter}")
@@ -38,6 +40,8 @@ def run_export(exporter: str = "wger") -> dict:
         return {"status": "already_running"}
     run_id = db.start_run(exporter)
     try:
+        if force:  # re-baseline: everything ref'd turns "changed"
+            db.clear_export_state(exporter)
         report = EXPORTERS[exporter]().push()
         status = "success" if not report.get("errors") else "partial"
         db.finish_run(run_id, status, json.dumps(report, ensure_ascii=False))
