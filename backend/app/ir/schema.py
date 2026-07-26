@@ -4,6 +4,7 @@ This module must not import any connector code (ADR-STR-001).
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from typing import Any, Literal, Optional
@@ -179,10 +180,24 @@ def parse_doc(body: dict[str, Any]) -> Envelope:
 
 
 def slugify(name: str) -> str:
-    """Stable merge key for exercises (ir-spec.md §3.1)."""
+    """ASCII slug (kept for non-exercise uses). Exercise IDs use exercise_id_from_name."""
     text = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
     text = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
     return text or "unnamed"
+
+
+def exercise_id_from_name(name: str, fallback: str = "") -> str:
+    """Stable merge key for exercise docs (ir-spec.md §3.1).
+
+    Hash of NFKC-normalized name so any Unicode script works and two
+    importers that agree on the name produce the same IR id.  When the
+    name is empty the Hevy template id is used as a fallback so there is
+    never a collision on the empty string."""
+    key = unicodedata.normalize("NFKC", (name or "").strip()).lower()
+    if not key:
+        key = f"__fallback:{fallback}"
+    h = hashlib.sha256(key.encode()).hexdigest()[:16]
+    return f"exr_{h}"
 
 
 def rpe_to_rir(rpe: float) -> float:

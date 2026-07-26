@@ -13,7 +13,7 @@ from typing import Any, Iterator, Optional
 import httpx
 
 from .. import db
-from ..ir.schema import FITIR_VERSION, slugify
+from ..ir.schema import FITIR_VERSION, exercise_id_from_name
 
 log = logging.getLogger(__name__)
 
@@ -89,7 +89,8 @@ class HevyImporter:
         ir_id = db.find_ref(SYSTEM, "exercise_template", template["id"])
         doc = db.get_doc("exercise", ir_id) if ir_id else None
         if doc is None:
-            ir_id = f"exr_{slugify(template.get('title', template['id']))}"
+            ir_id = exercise_id_from_name(
+                template.get("title", ""), fallback=template.get("id", ""))
             doc = db.get_doc("exercise", ir_id)
         if doc is None:
             doc = {
